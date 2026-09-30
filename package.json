@@ -1,0 +1,40 @@
+{
+  "name": "predict-game",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "preprocess": "tsx scripts/preprocess.ts",
+    "dev": "concurrently -k -n api,web -c cyan,magenta \"tsx watch backend/src/server.ts\" \"vite\"",
+    "dev:api": "tsx watch backend/src/server.ts",
+    "dev:web": "vite",
+    "start": "tsx backend/src/server.ts",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
+    "preview": "npm run build && tsx backend/src/server.ts",
+    "test": "vitest run",
+    "lint": "oxlint"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/static": "^10.1.5",
+    "fastify": "^5.12.5",
+    "fastify-plugin": "^6.0.0",
+    "lightweight-charts": "^5.2.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "oxlint": "^1.81.0",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.2"
+  }
+}
