@@ -6,18 +6,19 @@
 
 ```bash
 npm install
-npm run preprocess   # 首次必需：将 data/*_1min.txt 重采样为紧凑二进制
-npm run dev          # 前端 http://localhost:5173 ，API http://127.0.0.1:3001
+docker compose up -d          # 启动 Redis（会话存储）
+npm run preprocess            # 首次必需：将 data/*_1min.txt 重采样为紧凑二进制
+npm run dev                   # 前端 http://localhost:5173 ，API http://127.0.0.1:3001
 ```
 
-开发时 Vite 把 `/api` 代理到 Fastify。浏览器只打开前端地址。
+开发时 Vite 把 `/api` 代理到 Fastify。浏览器只打开前端地址。未登录会跳转到登录页。
 
 其他脚本：
 
 - `npm run dev:api` / `npm run dev:web` — 只启动后端或前端
 - `npm run build` — 类型检查并构建前端
 - `npm start` / `npm run preview` — 由后端在 http://127.0.0.1:5173 同时提供页面和 API（需先有 `dist/`，`preview` 会先构建）
-- `npm test` — 单元测试（重采样、截断、评分、统计、SQLite）
+- `npm test` — 单元测试（重采样、截断、评分、统计、鉴权、SQLite）
 
 环境变量（都有默认值）：
 
@@ -28,6 +29,12 @@ npm run dev          # 前端 http://localhost:5173 ，API http://127.0.0.1:3001
 | `DATABASE_PATH` | `data/app.sqlite` | SQLite 文件 |
 | `CORS_ORIGIN` | `http://localhost:5173` | 允许的前端来源 |
 | `VITE_API_BASE` | 空 | 前端直接请求的 API 源；空则走同源 `/api` |
+| `REDIS_HOST` | `127.0.0.1` | Redis 主机；测试可用 `memory` 走内存会话 |
+| `REDIS_PORT` | `6379` | Redis 端口 |
+| `REDIS_PASSWORD` | 空 | Redis 密码（可选） |
+| `REDIS_DB` | `0` | Redis DB 序号 |
+| `SESSION_TTL_SEC` | `604800`（7 天） | 会话过期时间 |
+| `COOKIE_SECURE` | 未设置 | 设为 `1` 时 session cookie 带 `Secure`（HTTPS） |
 
 ## 数据说明
 
@@ -68,9 +75,15 @@ MM/DD/YYYY,HH:mm,open,high,low,close,volume
 - **浏览行情**模式可看完整历史
 - 提交涨/跌后揭晓目标 K 线，截断放宽至该 K 线收盘；「下一题」再随机新的 T
 
-## 统计维度
+## 用户与统计
 
-对局写入 `localStorage`，统计分析页包含：
+需要先注册 / 登录。Session 保存在 **Redis**（httpOnly cookie `sid`），用户账户与对局统计保存在 **SQLite**。
+
+- `POST /api/auth/register`、`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/me`
+- `GET/POST/DELETE /api/stats/rounds`、`POST /api/stats/migrate`（一次性上传旧版 localStorage 记录）
+- 出题 / 揭晓 / K 线接口需登录；未登录返回 401，前端跳转登录页
+
+统计分析页包含：
 
 - 总体：局数、胜负、胜率、当前/最长连胜连败、近 20/50/100 局胜率
 - 按品种、预测周期、答题时图表周期
@@ -85,15 +98,18 @@ MM/DD/YYYY,HH:mm,open,high,low,close,volume
 
 - `GET /api/health`、`GET /api/meta`、`GET /api/bars`
 - `POST /api/round/next`、`POST /api/round/reveal`、`POST /api/round/reveal-bracket`
+- 鉴权与统计见上一节
 
 K 线仍放在 `data/processed/*.bin`。启动时载入内存做随机抽题、ATR 和防泄漏截断；这些是整段数组扫描，不按行查询。SQLite（`data/app.sqlite`，Node 内置 `node:sqlite`）保存应用状态：
 
-- `rounds`：服务端回合密钥（预测目标的下标）。答案不会返回给前端。`user_id` 目前为空
+- `users`：账号（scrypt 密码哈希）；登录名存在 `email` 列
+- `user_rounds`：当前用户的对局统计（JSON payload）
+- `rounds`：服务端回合密钥（预测目标的下标）。答案不会返回给前端；已登录时写入 `user_id`
 - `series_catalog`：已加载行情序列的根数和时间范围
-- `users`、`sessions`：账户和登录预留表，本次没有注册、登录或鉴权路由
+- `sessions` 表为历史预留；**实际会话只存 Redis**
 
-`request.userId` 现恒为 `null`。以后做登录时，在 `backend/src/modules/auth/plugin.ts` 里校验会话并写入这个字段；出题接口已经会把它记进 `rounds.user_id`。个人胜率统计仍在浏览器 `localStorage`，避免在没有用户身份时把所有人的记录混在一起。
+密码用 Node `scrypt` 哈希。Session id 放在 httpOnly、SameSite=Lax 的 cookie 中。
 
 ## 技术栈
 
-前端：Vite + React + TypeScript + lightweight-charts。后端：Fastify + SQLite。图表按窗口向 API 取 K 线，不把原始文本送进浏览器。
+前端：Vite + React + TypeScript + lightweight-charts。后端：Fastify + SQLite + Redis。图表按窗口向 API 取 K 线，不把原始文本送进浏览器。

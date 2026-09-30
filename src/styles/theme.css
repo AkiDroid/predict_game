@@ -172,6 +172,63 @@ a:hover {
   font-family: var(--mono);
 }
 
+.header-user {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.header-username {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-shell {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  background:
+    radial-gradient(900px 480px at 20% -10%, rgba(61, 156, 253, 0.1), transparent 55%),
+    radial-gradient(700px 420px at 90% 110%, rgba(38, 166, 154, 0.08), transparent 50%),
+    var(--bg-0);
+}
+
+.auth-card {
+  width: min(420px, 100%);
+  padding: 28px 24px 22px;
+}
+
+.auth-brand {
+  margin-bottom: 18px;
+  font-size: 22px;
+}
+
+.auth-card h1 {
+  margin: 0 0 8px;
+  font-size: 22px;
+}
+
+.auth-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.auth-switch {
+  margin: 16px 0 0;
+  font-size: 13px;
+  text-align: center;
+}
+
 .app-main {
   flex: 1;
   min-height: 0;
@@ -1106,6 +1163,14 @@ table.data th {
     font-size: 10px;
   }
 
+  .header-user {
+    max-width: 42vw;
+  }
+
+  .header-username {
+    max-width: 72px;
+  }
+
   .nav {
     position: fixed;
     left: 0;
@@ -1263,6 +1328,10 @@ table.data th {
 
 @media (max-width: 380px) {
   .header-meta {
+    display: none;
+  }
+
+  .header-username {
     display: none;
   }
 }

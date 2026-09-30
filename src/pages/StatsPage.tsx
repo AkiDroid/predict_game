@@ -1,16 +1,38 @@
-import { useMemo, useRef, useEffect, useState } from 'react';
+import { useMemo, useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { clearRounds, loadRounds } from '../lib/storage';
+import { clearRounds, hydrateRounds, loadRounds } from '../lib/storage';
 import { computeStats, isSkipped, type SliceStat } from '../lib/stats';
 import { TIMEFRAME_LABELS, type PlayMode, type RoundRecord, type SymbolId, type Timeframe } from '../lib/types';
 import { formatChicago } from '../lib/time';
 
 export function StatsPage() {
-  const [rounds, setRounds] = useState(() => loadRounds());
+  const [rounds, setRounds] = useState<RoundRecord[]>(() => loadRounds());
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [filterSym, setFilterSym] = useState<SymbolId | 'all'>('all');
   const [filterTf, setFilterTf] = useState<Timeframe | 'all'>('all');
   const [filterMode, setFilterMode] = useState<PlayMode | 'all'>('all');
   const report = useMemo(() => computeStats(rounds), [rounds]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const next = await hydrateRounds();
+        if (!cancelled) {
+          setRounds(next);
+          setLoadError(null);
+        }
+      } catch (e) {
+        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filtered = useMemo(() => {
     return [...rounds]
@@ -19,6 +41,24 @@ export function StatsPage() {
       .filter((r) => (filterTf === 'all' ? true : r.playTf === filterTf))
       .filter((r) => (filterMode === 'all' ? true : (r.mode ?? 'direction') === filterMode));
   }, [rounds, filterSym, filterTf, filterMode]);
+
+  if (loading) {
+    return (
+      <div className="page">
+        <h1>统计分析</h1>
+        <div className="panel empty">正在加载对局记录…</div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="page">
+        <h1>统计分析</h1>
+        <div className="error-banner">{loadError}</div>
+      </div>
+    );
+  }
 
   if (rounds.length === 0) {
     return (
@@ -42,9 +82,8 @@ export function StatsPage() {
           type="button"
           className="btn btn-ghost btn-sm"
           onClick={() => {
-            if (confirm('确认清空全部本地对局记录？')) {
-              clearRounds();
-              setRounds([]);
+            if (confirm('确认清空全部对局记录？')) {
+              void clearRounds().then(() => setRounds([]));
             }
           }}
         >
@@ -52,7 +91,7 @@ export function StatsPage() {
         </button>
       </div>
       <p className="lead">
-        基于 localStorage 中的历史对局。胜率与连胜只计已结算的对局；跳过和止盈止损里的「未触及」不计胜负。方向预测与止盈止损可以在「按模式」里分开看。分片作答
+        基于当前账号在服务端保存的历史对局。胜率与连胜只计已结算的对局；跳过和止盈止损里的「未触及」不计胜负。方向预测与止盈止损可以在「按模式」里分开看。分片作答
         n&lt;30 标记为样本不足；Wilson 区间为近似 95% 置信区间。
       </p>
 

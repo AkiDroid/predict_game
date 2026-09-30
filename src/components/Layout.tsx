@@ -1,6 +1,15 @@
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { useAuth } from '../lib/auth';
 
 export function Layout() {
+  const { user, logout } = useAuth();
+  const nav = useNavigate();
+
+  async function onLogout() {
+    await logout();
+    nav('/login', { replace: true });
+  }
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -24,7 +33,14 @@ export function Layout() {
             <span className="nav-short">统计</span>
           </NavLink>
         </nav>
-        <div className="header-meta">时区 America/Chicago · 绿涨红跌</div>
+        <div className="header-user">
+          <span className="header-username" title={user?.username}>
+            {user?.displayName ?? user?.username}
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => void onLogout()}>
+            退出
+          </button>
+        </div>
       </header>
       <main className="app-main">
         <Outlet />

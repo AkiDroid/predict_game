@@ -1,11 +1,52 @@
 import type { PlayMode, RoundRecord } from './types';
 import { currentStreakValue } from './stats';
+import {
+  clearRoundsApi,
+  fetchRounds,
+  migrateRounds,
+  postRound,
+} from './api';
 
-const KEY = 'predict_game_rounds_v1';
+const LOCAL_KEY = 'predict_game_rounds_v1';
+
+/** In-memory cache of the logged-in user's rounds (server is source of truth). */
+let cache: RoundRecord[] = [];
 
 export function loadRounds(): RoundRecord[] {
+  return cache;
+}
+
+export function setRoundsCache(rounds: RoundRecord[]): void {
+  cache = rounds;
+}
+
+export async function hydrateRounds(): Promise<RoundRecord[]> {
+  const rounds = await fetchRounds();
+  cache = rounds;
+  return rounds;
+}
+
+export async function appendRound(round: RoundRecord): Promise<RoundRecord[]> {
+  await postRound(round);
+  cache = [...cache, round];
+  return cache;
+}
+
+export async function clearRounds(): Promise<void> {
+  await clearRoundsApi();
+  cache = [];
+}
+
+export function getStreakBeforeNext(mode?: PlayMode): number {
+  const rounds = loadRounds();
+  if (!mode) return currentStreakValue(rounds);
+  return currentStreakValue(rounds.filter((r) => (r.mode ?? 'direction') === mode));
+}
+
+/** Read legacy localStorage rounds (pre-auth). */
+export function peekLocalRounds(): RoundRecord[] {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(LOCAL_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as RoundRecord[];
     return Array.isArray(parsed) ? parsed : [];
@@ -14,23 +55,27 @@ export function loadRounds(): RoundRecord[] {
   }
 }
 
-export function saveRounds(rounds: RoundRecord[]): void {
-  localStorage.setItem(KEY, JSON.stringify(rounds));
+export function clearLocalRounds(): void {
+  localStorage.removeItem(LOCAL_KEY);
 }
 
-export function appendRound(round: RoundRecord): RoundRecord[] {
-  const rounds = loadRounds();
-  rounds.push(round);
-  saveRounds(rounds);
-  return rounds;
-}
-
-export function clearRounds(): void {
-  localStorage.removeItem(KEY);
-}
-
-export function getStreakBeforeNext(mode?: PlayMode): number {
-  const rounds = loadRounds();
-  if (!mode) return currentStreakValue(rounds);
-  return currentStreakValue(rounds.filter((r) => (r.mode ?? 'direction') === mode));
+/**
+ * If the server has no rounds yet and the browser still has legacy localStorage
+ * data, upload once then clear localStorage so it is no longer the source of truth.
+ */
+export async function migrateLocalIfNeeded(): Promise<void> {
+  const local = peekLocalRounds();
+  if (local.length === 0) {
+    await hydrateRounds();
+    return;
+  }
+  const server = await fetchRounds();
+  if (server.length > 0) {
+    clearLocalRounds();
+    cache = server;
+    return;
+  }
+  await migrateRounds(local);
+  clearLocalRounds();
+  cache = local;
 }

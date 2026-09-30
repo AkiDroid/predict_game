@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Direction, GameFilters, PlayMode, SymbolId, Timeframe } from '../../../../src/lib/types.ts';
 import { TIMEFRAMES } from '../../../../src/lib/types.ts';
+import { requireAuth } from '../auth/plugin.ts';
 
 const SYMBOLS = ['ES', 'NQ'] as const;
 const SESSIONS = ['asia', 'europe', 'america_rth', 'america_eth'] as const;
@@ -9,7 +10,7 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/api/round/next',
     {
-      preHandler: requireMarket,
+      preHandler: [requireAuth, requireMarket],
       schema: {
         body: {
           type: 'object',
@@ -60,7 +61,7 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/api/round/reveal',
     {
-      preHandler: requireMarket,
+      preHandler: [requireAuth, requireMarket],
       schema: {
         body: {
           type: 'object',
@@ -86,7 +87,7 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
   app.post(
     '/api/round/reveal-bracket',
     {
-      preHandler: requireMarket,
+      preHandler: [requireAuth, requireMarket],
       schema: {
         body: {
           type: 'object',

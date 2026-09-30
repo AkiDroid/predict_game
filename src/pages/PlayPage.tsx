@@ -168,7 +168,7 @@ export function PlayPage() {
         };
         setResult(revealed);
         const streakBefore = getStreakBeforeNext(mode);
-        appendRound({
+        await appendRound({
           id: ctx.roundId,
           playedAt: Date.now(),
           symbol: settings.symbol,
@@ -229,7 +229,7 @@ export function PlayPage() {
       };
       setResult(revealed);
       const streakBefore = getStreakBeforeNext(mode);
-      appendRound({
+      await appendRound({
         id: ctx.roundId,
         playedAt: Date.now(),
         symbol: settings.symbol,
@@ -292,7 +292,7 @@ export function PlayPage() {
     const tfAtSkip = chartTfRef.current;
     try {
       const streakBefore = getStreakBeforeNext(mode);
-      appendRound({
+      await appendRound({
         id: ctx.roundId,
         playedAt: Date.now(),
         symbol: settings.symbol,
