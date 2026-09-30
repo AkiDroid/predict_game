@@ -91,7 +91,7 @@ export function DatePicker({
         triggerRef.current?.focus();
       }
     }
-    function onPointer(e: MouseEvent) {
+    function onPointer(e: PointerEvent) {
       const target = e.target as Node;
       if (rootRef.current?.contains(target) || popRef.current?.contains(target)) return;
       setOpen(false);
@@ -105,10 +105,10 @@ export function DatePicker({
       window.setTimeout(() => document.removeEventListener('click', swallow, true), 0);
     }
     document.addEventListener('keydown', onKey);
-    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('pointerdown', onPointer);
     return () => {
       document.removeEventListener('keydown', onKey);
-      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('pointerdown', onPointer);
     };
   }, [open]);
 
@@ -121,18 +121,26 @@ export function DatePicker({
     function place() {
       if (!pop || !trigger) return;
       const rect = trigger.getBoundingClientRect();
-      const margin = 8;
+      const edge = 8;
       const gap = 6;
+      const nav = document.querySelector('.nav');
+      const navBox = nav?.getBoundingClientRect();
+      const navBlocks =
+        nav != null && getComputedStyle(nav).position === 'fixed' && navBox != null && navBox.height > 0
+          ? navBox.height
+          : 0;
       const width = pop.offsetWidth;
       const height = pop.offsetHeight;
+      const limitBottom = window.innerHeight - edge - navBlocks;
       let top = rect.bottom + gap;
-      if (top + height > window.innerHeight - margin) {
+      if (top + height > limitBottom) {
         const above = rect.top - height - gap;
-        if (above >= margin) top = above;
+        if (above >= edge) top = above;
+        else top = Math.max(edge, Math.min(top, limitBottom - height));
       }
       let left = rect.left;
-      if (left + width > window.innerWidth - margin) left = window.innerWidth - width - margin;
-      if (left < margin) left = margin;
+      if (left + width > window.innerWidth - edge) left = window.innerWidth - width - edge;
+      if (left < edge) left = edge;
       pop.style.top = `${top}px`;
       pop.style.left = `${left}px`;
       pop.style.visibility = 'visible';

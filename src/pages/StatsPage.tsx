@@ -36,12 +36,11 @@ export function StatsPage() {
 
   return (
     <div className="page">
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
-        <h1 style={{ margin: 0 }}>统计分析</h1>
+      <div className="page-head">
+        <h1>统计分析</h1>
         <button
           type="button"
-          className="btn btn-ghost"
-          style={{ marginLeft: 'auto', fontSize: 12 }}
+          className="btn btn-ghost btn-sm"
           onClick={() => {
             if (confirm('确认清空全部本地对局记录？')) {
               clearRounds();
@@ -110,14 +109,7 @@ export function StatsPage() {
         )}
       </div>
 
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-          gap: 12,
-          marginBottom: 16,
-        }}
-      >
+      <div className="slice-grid">
         <SliceTable title="按模式" rows={report.byMode} />
         <SliceTable title="按品种" rows={report.bySymbol} />
         <SliceTable title="按预测周期" rows={report.byPlayTf} />
@@ -132,7 +124,7 @@ export function StatsPage() {
       </div>
 
       <div className="panel card-block">
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', marginBottom: 10 }}>
+        <div className="filter-row">
           <h2 style={{ margin: 0 }}>最近对局</h2>
           <select value={filterSym} onChange={(e) => setFilterSym(e.target.value as SymbolId | 'all')}>
             <option value="all">全部品种</option>
@@ -293,15 +285,36 @@ function EquityChart({ equity }: { equity: { i: number; equity: number; rolling:
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas || equity.length === 0) return;
-    const dpr = window.devicePixelRatio || 1;
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, w, h);
+
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      if (w <= 0 || h <= 0) return;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      paintEquity(ctx, equity, w, h);
+    };
+
+    draw();
+    const ro = new ResizeObserver(draw);
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [equity]);
+
+  return <canvas ref={ref} className="equity-canvas" />;
+}
+
+function paintEquity(
+  ctx: CanvasRenderingContext2D,
+  equity: { i: number; equity: number; rolling: number }[],
+  w: number,
+  h: number,
+) {
 
     const pad = { l: 36, r: 12, t: 16, b: 24 };
     const eqs = equity.map((e) => e.equity);
@@ -346,12 +359,14 @@ function EquityChart({ equity }: { equity: { i: number; equity: number; rolling:
     ctx.stroke();
     ctx.setLineDash([]);
 
-    ctx.fillStyle = '#5c6b7d';
     ctx.font = '11px IBM Plex Mono, monospace';
-    ctx.fillText(`权益 ${eqs[eqs.length - 1]}`, pad.l, 12);
-    ctx.fillStyle = '#26a69a';
-    ctx.fillText('滚动胜率', pad.l + 80, 12);
-  }, [equity]);
-
-  return <canvas ref={ref} className="equity-canvas" />;
+    const equityLabel = `权益 ${eqs[eqs.length - 1]}`;
+    const rollLabel = '滚动胜率';
+    ctx.fillStyle = '#5c6b7d';
+    ctx.fillText(equityLabel, pad.l, 12);
+    const rollX = pad.l + ctx.measureText(equityLabel).width + 16;
+    if (rollX + ctx.measureText(rollLabel).width <= w - 8) {
+      ctx.fillStyle = '#26a69a';
+      ctx.fillText(rollLabel, rollX, 12);
+    }
 }

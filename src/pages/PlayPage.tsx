@@ -443,7 +443,7 @@ export function PlayPage() {
         : undefined;
 
   return (
-    <div className="page-wide">
+    <div className="page-wide play-page">
       <div className="chart-layout">
         <div className="panel chart-toolbar">
           <strong style={{ fontSize: 13 }}>
@@ -453,7 +453,7 @@ export function PlayPage() {
             {PLAY_MODE_LABELS[mode]} · {TIMEFRAME_LABELS[settings.playTf]}
           </span>
           <TimeframeBar value={chartTf} onChange={setChartTf} />
-          <span className="num" style={{ marginLeft: 'auto', fontSize: 12 }}>
+          <span className="num toolbar-stats">
             胜率{' '}
             <b className={statsSnap.rate >= 0.5 ? 'up' : 'down'}>
               {(statsSnap.rate * 100).toFixed(1)}%
@@ -542,7 +542,7 @@ export function PlayPage() {
                     跳过
                   </button>
                 </div>
-                <span className="muted" style={{ fontSize: 11 }}>
+                <span className="muted hint kbd-hint">
                   快捷键 <span className="kbd">↑</span> 涨 · <span className="kbd">↓</span> 跌 ·{' '}
                   <span className="kbd">X</span> 跳过（次数不限）
                 </span>
@@ -594,6 +594,18 @@ export function PlayPage() {
                       做空
                     </button>
                   </div>
+                  <div className="distance-stepper">
+                    <StepButton
+                      symbol="−"
+                      label="缩小距离"
+                      disabled={live.distance <= ctx.minDistance + 1e-6}
+                      onStep={() => nudgeBracket(-1)}
+                    />
+                    <span className="distance-stepper-label">
+                      距离 <b className="num">{live.distance.toFixed(2)}</b>
+                    </span>
+                    <StepButton symbol="+" label="增大距离" onStep={() => nudgeBracket(1)} />
+                  </div>
                   <button type="button" className="btn btn-primary btn-block" onClick={() => void confirmBracket()}>
                     确认{bracket.direction === 'up' ? '做多' : '做空'}
                   </button>
@@ -601,11 +613,14 @@ export function PlayPage() {
                     跳过
                   </button>
                 </div>
-                <span className="muted" style={{ fontSize: 11 }}>
+                <span className="muted hint kbd-hint">
                   拖动图上的止盈或止损线，另一条保持等距。拖过入场价会反向。快捷键{' '}
                   <span className="kbd">↑</span> 做多 · <span className="kbd">↓</span> 做空 ·{' '}
                   <span className="kbd">+</span>/<span className="kbd">−</span> 调整距离 ·{' '}
                   <span className="kbd">Enter</span> 确认 · <span className="kbd">X</span> 跳过
+                </span>
+                <span className="muted hint touch-hint">
+                  拖动图上的圆点或水平线调整距离，另一条保持等距。拖过入场价会反向。
                 </span>
               </>
             ) : null}
@@ -637,22 +652,18 @@ export function PlayPage() {
                     </span>
                   ) : null}
                 </div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <div className="result-actions">
                   <button type="button" className="btn btn-primary" onClick={() => void startRound()}>
                     下一题
                   </button>
                   <button type="button" className="btn" onClick={() => nav('/stats')}>
                     结束本局
                   </button>
-                  <Link
-                    className="btn btn-ghost"
-                    to="/"
-                    style={{ display: 'inline-flex', alignItems: 'center' }}
-                  >
+                  <Link className="btn btn-ghost" to="/">
                     返回设置
                   </Link>
                 </div>
-                <span className="muted" style={{ fontSize: 11 }}>
+                <span className="muted hint kbd-hint">
                   <span className="kbd">Enter</span> / <span className="kbd">Space</span> 下一题
                 </span>
               </>
@@ -670,29 +681,25 @@ export function PlayPage() {
                     </span>
                   ) : null}
                 </div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <div className="result-actions">
                   <button type="button" className="btn btn-primary" onClick={() => void startRound()}>
                     下一题
                   </button>
                   <button type="button" className="btn" onClick={() => nav('/stats')}>
                     结束本局
                   </button>
-                  <Link
-                    className="btn btn-ghost"
-                    to="/"
-                    style={{ display: 'inline-flex', alignItems: 'center' }}
-                  >
+                  <Link className="btn btn-ghost" to="/">
                     返回设置
                   </Link>
                 </div>
-                <span className="muted" style={{ fontSize: 11 }}>
+                <span className="muted hint kbd-hint">
                   <span className="kbd">Enter</span> / <span className="kbd">Space</span> 下一题
                 </span>
               </>
             ) : null}
           </section>
 
-          <section className="panel decision">
+          <section className="panel decision round-info">
             <h2 style={{ marginBottom: 4 }}>本局信息</h2>
             <div className="ctx-row">
               <span>
@@ -717,6 +724,69 @@ export function PlayPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+function StepButton({
+  symbol,
+  label,
+  onStep,
+  disabled,
+}: {
+  symbol: string;
+  label: string;
+  onStep: () => void;
+  disabled?: boolean;
+}) {
+  const timers = useRef<number[]>([]);
+  const onStepRef = useRef(onStep);
+  const held = useRef(false);
+  onStepRef.current = onStep;
+
+  const clear = () => {
+    for (const id of timers.current) window.clearTimeout(id);
+    timers.current = [];
+  };
+
+  useEffect(() => clear, []);
+
+  return (
+    <button
+      type="button"
+      className="btn step-btn"
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => {
+        if (held.current) return;
+        onStepRef.current();
+      }}
+      onPointerDown={(e) => {
+        if (disabled || e.button !== 0) return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        held.current = true;
+        onStepRef.current();
+        const arm = window.setTimeout(() => {
+          const tick = () => {
+            onStepRef.current();
+            timers.current.push(window.setTimeout(tick, 48));
+          };
+          timers.current.push(window.setTimeout(tick, 48));
+        }, 340);
+        timers.current.push(arm);
+      }}
+      onPointerUp={() => {
+        clear();
+        window.setTimeout(() => {
+          held.current = false;
+        }, 0);
+      }}
+      onPointerCancel={() => {
+        clear();
+        held.current = false;
+      }}
+    >
+      {symbol}
+    </button>
   );
 }
 

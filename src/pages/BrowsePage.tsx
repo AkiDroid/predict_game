@@ -60,19 +60,10 @@ export function BrowsePage() {
   );
 
   return (
-    <div className="page-wide">
+    <div className="page-wide browse-page">
       <div className="chart-layout">
         <div className="panel chart-toolbar">
-          <select
-            value={symbol}
-            onChange={(e) => setSymbol(e.target.value as SymbolId)}
-            style={{
-              backgroundColor: 'var(--bg-0)',
-              border: '1px solid var(--border)',
-              borderRadius: 6,
-              padding: '6px 28px 6px 10px',
-            }}
-          >
+          <select value={symbol} onChange={(e) => setSymbol(e.target.value as SymbolId)}>
             {(Object.keys(SYMBOL_META) as SymbolId[]).map((id) => (
               <option key={id} value={id}>
                 {SYMBOL_META[id].fullName} / {id}

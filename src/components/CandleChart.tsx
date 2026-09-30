@@ -175,44 +175,51 @@ export function CandleChart({
   }
   syncOverlayRef.current = syncOverlay;
 
-  function yInChart(clientY: number): number | null {
+  function pointInChart(clientX: number, clientY: number): { x: number; y: number } | null {
     const wrap = wrapRef.current;
     if (!wrap) return null;
-    return clientY - wrap.getBoundingClientRect().top;
+    const rect = wrap.getBoundingClientRect();
+    return { x: clientX - rect.left, y: clientY - rect.top };
   }
 
   function priceAt(clientY: number): number | null {
-    const y = yInChart(clientY);
+    const pt = pointInChart(0, clientY);
     const series = candleRef.current;
-    if (y == null || !series) return null;
-    const price = series.coordinateToPrice(y as Coordinate);
+    if (!pt || !series) return null;
+    const price = series.coordinateToPrice(pt.y as Coordinate);
     return price == null || Number.isNaN(price) ? null : price;
   }
 
-  function hitRole(clientY: number): 'tp' | 'sl' | null {
+  function hitRole(clientX: number, clientY: number): 'tp' | 'sl' | null {
     const live = bracketRef.current;
     const levels = activeLevels();
     const series = candleRef.current;
-    if (!live?.interactive || !levels || !series) return null;
-    const y = yInChart(clientY);
-    if (y == null) return null;
-    const yTp = series.priceToCoordinate(levels.takeProfit);
-    const ySl = series.priceToCoordinate(levels.stopLoss);
-    let best: { role: 'tp' | 'sl'; d: number } | null = null;
-    if (yTp != null) {
-      const d = Math.abs(y - yTp);
-      if (d <= HIT_PX) best = { role: 'tp', d };
-    }
-    if (ySl != null) {
-      const d = Math.abs(y - ySl);
-      if (d <= HIT_PX && (!best || d < best.d)) best = { role: 'sl', d };
-    }
-    return best?.role ?? null;
+    const pt = pointInChart(clientX, clientY);
+    if (!live?.interactive || !levels || !series || !pt) return null;
+    const coarse = touchUi();
+    const lineSlop = coarse ? 18 : HIT_PX;
+    const handleSlop = coarse ? 28 : 0;
+    const knobX = Math.max(0, (chartRef.current?.timeScale().width() ?? 0) - 22);
+    const score = (price: number) => {
+      const yLine = series.priceToCoordinate(price);
+      if (yLine == null || Number.isNaN(yLine)) return Number.POSITIVE_INFINITY;
+      const dy = Math.abs(pt.y - yLine);
+      let best = dy <= lineSlop ? dy : Number.POSITIVE_INFINITY;
+      if (handleSlop > 0) {
+        const d = Math.hypot(pt.x - knobX, pt.y - yLine);
+        if (d <= handleSlop && d < best) best = d;
+      }
+      return best;
+    };
+    const tp = score(levels.takeProfit);
+    const sl = score(levels.stopLoss);
+    if (tp === Number.POSITIVE_INFINITY && sl === Number.POSITIVE_INFINITY) return null;
+    return tp <= sl ? 'tp' : 'sl';
   }
 
-  function beginDrag(clientY: number): boolean {
+  function beginDrag(clientX: number, clientY: number): boolean {
     if (draggingRef.current) return true;
-    const role = hitRole(clientY);
+    const role = hitRole(clientX, clientY);
     if (!role) return false;
     draggingRef.current = role;
     if (containerRef.current) containerRef.current.style.cursor = 'ns-resize';
@@ -230,18 +237,27 @@ export function CandleChart({
       syncOverlayRef.current();
       onDragRef.current?.(next);
     };
-    const up = () => {
+    const end = () => {
       draggingRef.current = null;
       previewRef.current = null;
       window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
       dragCleanupRef.current = null;
+      if (containerRef.current) containerRef.current.style.cursor = '';
       candleRef.current?.priceScale().setAutoScale(true);
       requestAnimationFrame(() => syncOverlayRef.current());
+      const swallow = (ev: MouseEvent) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+      };
+      window.addEventListener('click', swallow, true);
+      window.setTimeout(() => window.removeEventListener('click', swallow, true), 0);
     };
-    dragCleanupRef.current = up;
+    dragCleanupRef.current = end;
     window.addEventListener('pointermove', move, { passive: false });
-    window.addEventListener('pointerup', up);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
     return true;
   }
 
@@ -281,6 +297,18 @@ export function CandleChart({
       },
       localization: { locale: 'zh-CN' },
       autoSize: true,
+      kineticScroll: { touch: true, mouse: false },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        mouseWheel: true,
+        pinch: true,
+        axisPressedMouseMove: { time: true, price: true },
+      },
     });
 
     const candles = chart.addSeries(CandlestickSeries, {
@@ -540,9 +568,15 @@ export function CandleChart({
     }
   }, [bEntry, bTp, bSl, bHit, bInteractive]);
 
-  function claimDrag(e: { button?: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) {
+  function claimDrag(e: {
+    button?: number;
+    clientX: number;
+    clientY: number;
+    preventDefault: () => void;
+    stopPropagation: () => void;
+  }) {
     if (e.button != null && e.button !== 0) return;
-    if (!beginDrag(e.clientY)) return;
+    if (!beginDrag(e.clientX, e.clientY)) return;
     e.preventDefault();
     e.stopPropagation();
   }
@@ -555,14 +589,25 @@ export function CandleChart({
 
   return (
     <div
-      className="chart-wrap"
+      className={`chart-wrap${bInteractive ? ' is-interactive' : ''}`}
       ref={wrapRef}
-      onPointerDownCapture={claimDrag}
+      onPointerDownCapture={(e) => {
+        if (!e.isPrimary) {
+          dragCleanupRef.current?.();
+          return;
+        }
+        claimDrag(e);
+      }}
       onMouseDownCapture={claimDrag}
       onTouchStartCapture={(e) => {
+        if (e.touches.length !== 1) {
+          dragCleanupRef.current?.();
+          return;
+        }
         const touch = e.touches[0];
         if (!touch) return;
         claimDrag({
+          clientX: touch.clientX,
           clientY: touch.clientY,
           preventDefault: () => e.preventDefault(),
           stopPropagation: () => e.stopPropagation(),
@@ -570,7 +615,8 @@ export function CandleChart({
       }}
       onPointerMove={(e) => {
         if (draggingRef.current || !containerRef.current || !bracketRef.current?.interactive) return;
-        if (hitRole(e.clientY)) containerRef.current.style.cursor = 'ns-resize';
+        if (hitRole(e.clientX, e.clientY)) containerRef.current.style.cursor = 'ns-resize';
+        else if (!draggingRef.current) containerRef.current.style.cursor = '';
       }}
     >
       {watermark ? (
@@ -605,8 +651,22 @@ export function CandleChart({
           <span>{slTitle}</span>
         </div>
       ) : null}
+      {bInteractive && overlay?.tpY != null ? (
+        <div className="bracket-handle up" style={handleStyle(overlay.tpY, overlay.width)} />
+      ) : null}
+      {bInteractive && overlay?.slY != null ? (
+        <div className="bracket-handle down" style={handleStyle(overlay.slY, overlay.width)} />
+      ) : null}
     </div>
   );
+}
+
+function touchUi(): boolean {
+  return window.matchMedia('(pointer: coarse), (hover: none)').matches;
+}
+
+function handleStyle(y: number, width: number) {
+  return { top: y, left: Math.max(0, width - 22) };
 }
 
 function paintLines(

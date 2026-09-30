@@ -78,7 +78,7 @@ export function HomePage() {
           <div style={{ display: 'grid', gap: 14 }}>
             <div className="field">
               <label>模式</label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              <div className="choice-row">
                 {(Object.keys(PLAY_MODE_LABELS) as PlayMode[]).map((id) => (
                   <button
                     key={id}
@@ -122,7 +122,7 @@ export function HomePage() {
                 ))}
               </select>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div className="date-fields">
               <div className="field">
                 <label>起始日期（可选）</label>
                 <DatePicker
@@ -146,15 +146,14 @@ export function HomePage() {
             </div>
             <div className="field">
               <label>交易时段过滤（可选，影响随机题池与统计）</label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              <div className="choice-row">
                 {ALL_SESSIONS.map((s) => {
                   const on = sessions.includes(s);
                   return (
                     <button
                       key={s}
                       type="button"
-                      className={`btn ${on ? 'btn-primary' : 'btn-ghost'}`}
-                      style={{ padding: '6px 10px', fontSize: 12 }}
+                      className={`btn btn-sm ${on ? 'btn-primary' : 'btn-ghost'}`}
                       onClick={() =>
                         setSessions((prev) =>
                           on ? prev.filter((x) => x !== s) : [...prev, s],
@@ -170,7 +169,7 @@ export function HomePage() {
                 默认不限制（使用全部可用数据）。时段按时区 America/Chicago 划分。
               </span>
             </div>
-            <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+            <div className="action-row">
               <button type="button" className="btn btn-primary" onClick={start} disabled={!health.ok}>
                 开始游戏
               </button>
@@ -206,7 +205,10 @@ export function HomePage() {
           </p>
           <ul>
             <li>方向模式快捷键：↑ 涨 · ↓ 跌 · X 跳过 · Enter/Space 下一题</li>
-            <li>止盈止损快捷键：↑ 做多 · ↓ 做空 · +/− 调整距离 · Enter 确认 · X 跳过。距离主要在图上拖动</li>
+            <li>
+              止盈止损：在图上拖动止盈或止损调整距离（触控屏拖右侧圆点，也可用 +/−）。键盘 ↑ 做多 · ↓ 做空 · Enter
+              确认 · X 跳过
+            </li>
             <li>行情和出题由后端提供。个人对局统计仍保存在本机浏览器，刷新不丢失</li>
             <li>图表周期可随时切换，与预测周期相互独立</li>
           </ul>
