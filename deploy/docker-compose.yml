@@ -1,0 +1,93 @@
+# 生产栈。在 deploy/ 目录执行，或使用 ./deploy/up.sh。
+# 本地开发的 Redis 仍用仓库根目录的 docker-compose.yml。
+
+name: predict-game
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      HOME: /tmp
+      HOST: 0.0.0.0
+      PORT: "5173"
+      SERVE_STATIC: "1"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      NODE_OPTIONS: "--max-old-space-size=2048"
+      REDIS_PASSWORD: "${REDIS_PASSWORD}"
+      DATABASE_PATH: /app/data/app.sqlite
+      PROCESSED_DIR: /app/data/processed
+      COOKIE_SECURE: "${COOKIE_SECURE}"
+      CORS_ORIGIN: "${CORS_ORIGIN}"
+      SESSION_TTL_SEC: "${SESSION_TTL_SEC:-604800}"
+    volumes:
+      - ../data:/app/data
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    logging: *logging
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5173/api/health').then(async (r) => { const body = await r.json(); process.exit(r.ok && body.ok ? 0 : 1); }).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 180s
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - "${REDIS_PASSWORD}"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS}"
+      ACME_EMAIL: "${ACME_EMAIL:-internal@localhost}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_started
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:

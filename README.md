@@ -20,6 +20,8 @@ npm run dev                   # 前端 http://localhost:5173 ，API http://127.0
 - `npm start` / `npm run preview` — 由后端在 http://127.0.0.1:5173 同时提供页面和 API（需先有 `dist/`，`preview` 会先构建）
 - `npm test` — 单元测试（重采样、截断、评分、统计、鉴权、SQLite）
 
+单台 Ubuntu 上的 Docker 部署（Caddy、应用、Redis）见 [DEPLOY.md](DEPLOY.md)。上面的 `docker compose up -d` 只启动本机开发用的 Redis。
+
 环境变量（都有默认值）：
 
 | 变量 | 默认 | 作用 |

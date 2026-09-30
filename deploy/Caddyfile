@@ -1,0 +1,11 @@
+{
+	email {$ACME_EMAIL:internal@localhost}
+	# Cloudflare Flexible 用 HTTP 回源。自动把 HTTP 跳到 HTTPS 会让浏览器无限重定向。
+	auto_https disable_redirects
+}
+
+# 80 与 443 都直接反代。SITE_ADDRESS 需为域名；纯 IP 部署请把地址改成 :80。
+http://{$SITE_ADDRESS}, https://{$SITE_ADDRESS} {
+	encode gzip zstd
+	reverse_proxy app:5173
+}
