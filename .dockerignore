@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-ssr
+data
+.git
+.DS_Store
+*.log
+.env
+deploy/.env
+coverage
+.vscode
+.idea
