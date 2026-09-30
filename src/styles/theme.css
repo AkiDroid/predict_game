@@ -517,13 +517,56 @@ h2 {
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+  display: flex;
+  flex-direction: column;
 }
 
 .chart-canvas {
   width: 100%;
-  height: 100%;
+  flex: 1 1 0;
   min-height: 0;
   touch-action: none;
+}
+
+.chart-tzbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 3px 8px;
+  border-top: 1px solid var(--border);
+  background: #0b1015;
+  font-size: 12px;
+  color: var(--text-dim);
+  touch-action: auto;
+}
+
+.chart-tzbar-time {
+  color: var(--text);
+  white-space: pre;
+}
+
+.chart-tzbar-offset {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.chart-tzbar-zone {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chart-tzbar-zone select {
+  min-width: 0;
+  max-width: 260px;
+  padding: 2px 24px 2px 6px;
+  background-position: right 6px center;
+  font-size: 12px;
+  font-family: var(--mono);
 }
 
 .chart-watermark {
@@ -1266,6 +1309,17 @@ table.data th {
     max-width: calc(100% - 24px);
   }
 
+  .chart-tzbar {
+    gap: 8px;
+    padding: 3px 6px;
+  }
+
+  .chart-tzbar-zone select {
+    font-size: 16px;
+    min-height: 32px;
+    max-width: 44vw;
+  }
+
   .chart-watermark .badge {
     display: inline-block;
     max-width: 100%;
@@ -1400,5 +1454,65 @@ table.data th {
   .play-page .round-info,
   .play-page .hint {
     display: none;
+  }
+}
+
+@media (min-width: 1024px) {
+  .app-shell:has(.play-page) {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-shell:has(.play-page) .app-main {
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .play-page {
+    overflow: hidden;
+  }
+
+  .play-page .chart-layout {
+    grid-template-columns: minmax(0, 1fr) clamp(320px, 26vw, 400px);
+    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas:
+      "toolbar side"
+      "error side"
+      "chart side";
+    column-gap: 12px;
+    row-gap: 0;
+    overflow: hidden;
+  }
+
+  .play-page .chart-toolbar {
+    grid-area: toolbar;
+    margin-bottom: 8px;
+  }
+
+  .play-page .error-banner {
+    grid-area: error;
+    margin-bottom: 8px;
+  }
+
+  .play-page .chart-wrap {
+    grid-area: chart;
+    height: auto;
+    min-height: 200px;
+  }
+
+  .play-page .play-footer {
+    grid-area: side;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .play-page .play-footer > .panel {
+    flex: none;
   }
 }

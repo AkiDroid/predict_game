@@ -4,6 +4,7 @@ import {
   CrosshairMode,
   HistogramSeries,
   LineStyle,
+  TickMarkType,
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
@@ -15,8 +16,16 @@ import {
   type Coordinate,
   createChart,
 } from 'lightweight-charts';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { bracketFromPointer, formatAtrMultiple, PRICE_TICK, type Bracket } from '../lib/bracket';
+import {
+  formatOffset,
+  formatZoned,
+  listTimeZones,
+  useTimeZone,
+  zoneOffsetMinutes,
+  zoneParts,
+} from '../lib/timezone';
 import type { Bar } from '../lib/types';
 import {
   barIndexByTime,
@@ -126,6 +135,8 @@ export function CandleChart({
   const captureAnchorRef = useRef<() => void>(() => {});
   const [legend, setLegend] = useState('');
   const [overlay, setOverlay] = useState<Overlay | null>(null);
+  const [hoverTime, setHoverTime] = useState<number | null>(null);
+  const [timeZone, setTimeZone] = useTimeZone();
 
   barsRef.current = bars;
   onNeedMoreRef.current = onNeedMoreHistory;
@@ -364,6 +375,7 @@ export function CandleChart({
     window.addEventListener('pointercancel', disarmUserView);
 
     chart.subscribeCrosshairMove((param) => {
+      setHoverTime(param.time == null ? null : timeToUnix(param.time));
       if (!param.time || !param.seriesData.size) {
         const last = barsRef.current[barsRef.current.length - 1];
         if (last) {
@@ -432,6 +444,23 @@ export function CandleChart({
       timeScale: { shiftVisibleRangeOnNewBar: anchorTime == null },
     });
   }, [anchorTime]);
+
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      localization: {
+        locale: 'zh-CN',
+        timeFormatter: (time: Time) => formatZoned(timeToUnix(time), timeZone),
+      },
+      timeScale: {
+        tickMarkFormatter: (time: Time, type: TickMarkType) => formatTick(timeToUnix(time), type, timeZone),
+      },
+    });
+  }, [timeZone]);
+
+  const zoneOptions = useMemo(
+    () => listTimeZones().map((tz) => ({ tz, label: `${formatOffset(zoneOffsetMinutes(tz))} · ${tz}` })),
+    [],
+  );
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -587,19 +616,26 @@ export function CandleChart({
   const tpTitle = `${bHit === 'tp' ? '止盈 触及' : '止盈'} ${overlay ? overlay.takeProfit.toFixed(2) : ''} · ${mult}`;
   const slTitle = `${bHit === 'sl' ? '止损 触及' : '止损'} ${overlay ? overlay.stopLoss.toFixed(2) : ''} · ${mult}`;
 
+  const readoutTime = hoverTime ?? bars[bars.length - 1]?.t ?? null;
+  const readoutOffset = formatOffset(zoneOffsetMinutes(timeZone, readoutTime ?? undefined));
+
   return (
     <div
       className={`chart-wrap${bInteractive ? ' is-interactive' : ''}`}
       ref={wrapRef}
       onPointerDownCapture={(e) => {
+        if (inTzBar(e.target)) return;
         if (!e.isPrimary) {
           dragCleanupRef.current?.();
           return;
         }
         claimDrag(e);
       }}
-      onMouseDownCapture={claimDrag}
+      onMouseDownCapture={(e) => {
+        if (!inTzBar(e.target)) claimDrag(e);
+      }}
       onTouchStartCapture={(e) => {
+        if (inTzBar(e.target)) return;
         if (e.touches.length !== 1) {
           dragCleanupRef.current?.();
           return;
@@ -657,8 +693,60 @@ export function CandleChart({
       {bInteractive && overlay?.slY != null ? (
         <div className="bracket-handle down" style={handleStyle(overlay.slY, overlay.width)} />
       ) : null}
+      <div className="chart-tzbar">
+        <span className="chart-tzbar-time num">{readoutTime != null ? formatZoned(readoutTime, timeZone) : '—'}</span>
+        <span className="chart-tzbar-offset num">{readoutOffset}</span>
+        <label className="chart-tzbar-zone">
+          <span className="muted">时区</span>
+          <select
+            aria-label="图表时区"
+            value={timeZone}
+            onChange={(e) => {
+              setTimeZone(e.target.value);
+              e.currentTarget.blur();
+            }}
+          >
+            {zoneOptions.map((o) => (
+              <option key={o.tz} value={o.tz}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
     </div>
   );
+}
+
+function inTzBar(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('.chart-tzbar') != null;
+}
+
+function timeToUnix(time: Time): number {
+  if (typeof time === 'number') return time;
+  if (typeof time === 'string') return Math.floor(Date.parse(time) / 1000);
+  return Math.floor(Date.UTC(time.year, time.month - 1, time.day) / 1000);
+}
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+/** Axis tick label in the display zone. Day-level ticks keep the clock when it is not midnight there. */
+function formatTick(unixSec: number, type: TickMarkType, timeZone: string): string {
+  const p = zoneParts(unixSec, timeZone);
+  const clock = `${pad2(p.hour)}:${pad2(p.minute)}`;
+  const midnight = p.hour === 0 && p.minute === 0;
+  switch (type) {
+    case TickMarkType.Year:
+      return midnight ? `${p.year}` : `${p.year}/${pad2(p.month)}/${pad2(p.day)} ${clock}`;
+    case TickMarkType.Month:
+      return midnight ? `${p.year}/${pad2(p.month)}` : `${p.year}/${pad2(p.month)}/${pad2(p.day)} ${clock}`;
+    case TickMarkType.DayOfMonth:
+      return midnight ? `${pad2(p.month)}/${pad2(p.day)}` : `${pad2(p.month)}/${pad2(p.day)} ${clock}`;
+    case TickMarkType.TimeWithSeconds:
+      return `${clock}:${pad2(p.second)}`;
+    default:
+      return clock;
+  }
 }
 
 function touchUi(): boolean {

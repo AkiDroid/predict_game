@@ -6,6 +6,9 @@ export const PRICE_TICK = 0.25;
 /** How many play-timeframe bars to scan before calling the trade unresolved. */
 export const BRACKET_MAX_BARS = 500;
 
+/** Starting take-profit / stop-loss distance for a new round, in ATR multiples. */
+export const DEFAULT_BRACKET_ATR_MULTIPLE = 2;
+
 export type TouchOutcome = 'tp' | 'sl';
 
 export interface Bracket {
@@ -42,6 +45,17 @@ export function snapDistance(raw: number, minDistance: number, tick = PRICE_TICK
   let snapped = Math.round(clamped / tick) * tick;
   if (snapped + 1e-6 < floor) snapped = floor;
   return cleanTick(snapped);
+}
+
+/** Default distance for a new round: `multiple`×ATR on the tick grid, never below `minDistance`. */
+export function defaultBracketDistance(
+  atr: number,
+  minDistance: number,
+  multiple = DEFAULT_BRACKET_ATR_MULTIPLE,
+  tick = PRICE_TICK,
+): number {
+  if (!(atr > 0)) return snapDistance(minDistance, minDistance, tick);
+  return snapDistance(ceilToTick(atr * multiple, tick), minDistance, tick);
 }
 
 export function makeBracket(entry: number, direction: Direction, distance: number): Bracket {

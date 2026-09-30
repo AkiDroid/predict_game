@@ -92,7 +92,7 @@ export function HomePage() {
               </div>
               <span className="muted" style={{ fontSize: 11 }}>
                 {settings.mode === 'bracket'
-                  ? '在图上拖动止盈、止损。盈亏比固定 1:1，距离不小于 1×ATR(14)。先碰到止盈算赢，先碰到止损算输。'
+                  ? '在图上拖动止盈、止损。盈亏比固定 1:1，默认距离 2×ATR(14)，不小于 1×ATR(14)。先碰到止盈算赢，先碰到止损算输。'
                   : '判断下一根K线收盘相对开盘是涨还是跌。'}
               </span>
             </div>

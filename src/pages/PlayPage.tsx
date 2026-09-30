@@ -5,6 +5,7 @@ import { TimeframeBar } from '../components/TimeframeBar';
 import { fetchBars, nextRound, revealBracket, revealRound } from '../lib/api';
 import {
   BRACKET_MAX_BARS,
+  defaultBracketDistance,
   formatAtrMultiple,
   makeBracket,
   PRICE_TICK,
@@ -16,7 +17,7 @@ import { SESSION_LABELS } from '../lib/session';
 import { loadSettings } from '../lib/settings';
 import { computeOverall, currentStreakValue } from '../lib/stats';
 import { appendRound, getStreakBeforeNext, loadRounds } from '../lib/storage';
-import { formatChicago } from '../lib/time';
+import { formatZoned, useTimeZone } from '../lib/timezone';
 import {
   PLAY_MODE_LABELS,
   SYMBOL_META,
@@ -51,6 +52,7 @@ export function PlayPage() {
   const nav = useNavigate();
   const location = useLocation();
   const settings = loadSettings();
+  const [timeZone] = useTimeZone();
   const mode: PlayMode = settings.mode === 'bracket' ? 'bracket' : 'direction';
   const [chartTf, setChartTf] = useState<Timeframe>(settings.playTf);
   const [bars, setBars] = useState<Bar[]>([]);
@@ -123,7 +125,7 @@ export function PlayPage() {
       const round = await nextRound(settings.symbol, settings.playTf, settings.filters, mode);
       setCtx(round);
       if (mode === 'bracket') {
-        setBracket({ direction: 'up', distance: round.minDistance });
+        setBracket({ direction: 'up', distance: defaultBracketDistance(round.atr, round.minDistance) });
       }
       startedAt.current = performance.now();
       await reloadChart(round, null, chartTfRef.current);
@@ -436,10 +438,10 @@ export function PlayPage() {
   const watermark =
     ctx && phase === 'deciding'
       ? mode === 'bracket'
-        ? `止盈止损 · 拖动水平线 · 截止 ${formatChicago(ctx.cutoff)}`
-        : `预测模式 · 数据截止 ${formatChicago(ctx.cutoff)}`
+        ? `止盈止损 · 拖动水平线 · 截止 ${formatZoned(ctx.cutoff, timeZone)}`
+        : `预测模式 · 数据截止 ${formatZoned(ctx.cutoff, timeZone)}`
       : ctx && phase === 'revealed'
-        ? `已揭晓 · 目标 ${formatChicago(ctx.cutoff)}`
+        ? `已揭晓 · 目标 ${formatZoned(ctx.cutoff, timeZone)}`
         : undefined;
 
   return (
@@ -493,7 +495,7 @@ export function PlayPage() {
                 {!ctx ? (
                   <p className="muted" style={{ margin: 0, fontSize: 13 }}>
                     {mode === 'bracket'
-                      ? '点击开始后将随机跳转到历史某一时刻。在图上拖动止盈和止损，两者始终等距，且不小于 1×ATR。先碰到止盈算赢，先碰到止损算输。'
+                      ? '点击开始后将随机跳转到历史某一时刻。在图上拖动止盈和止损，两者始终等距，默认 2×ATR，且不小于 1×ATR。先碰到止盈算赢，先碰到止损算输。'
                       : '点击开始后将随机跳转到历史某一时刻，请根据截止前的走势判断下一根预测周期K线方向。拿不准可以跳过，次数不限。'}
                   </p>
                 ) : null}
@@ -507,7 +509,7 @@ export function PlayPage() {
               <>
                 <div className="ctx-row">
                   <span>
-                    截止 <b>{formatChicago(ctx.cutoff)}</b>
+                    截止 <b>{formatZoned(ctx.cutoff, timeZone)}</b>
                   </span>
                   <span>
                     昨收 <b className="num">{ctx.lastBar.c.toFixed(2)}</b>
@@ -553,7 +555,7 @@ export function PlayPage() {
               <>
                 <div className="ctx-row">
                   <span>
-                    截止 <b>{formatChicago(ctx.cutoff)}</b>
+                    截止 <b>{formatZoned(ctx.cutoff, timeZone)}</b>
                   </span>
                   <span>
                     入场 <b className="num">{live.entry.toFixed(2)}</b>
@@ -642,7 +644,7 @@ export function PlayPage() {
                       {' '}
                       入场 {result.entry.toFixed(2)} 止盈 {result.takeProfit.toFixed(2)} 止损{' '}
                       {result.stopLoss.toFixed(2)}
-                      {result.hitTime != null ? ` · 触及 ${formatChicago(result.hitTime)}` : ''}
+                      {result.hitTime != null ? ` · 触及 ${formatZoned(result.hitTime, timeZone)}` : ''}
                     </span>
                   ) : null}
                   {result.nextBar ? (

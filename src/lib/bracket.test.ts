@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   bracketFromPointer,
+  DEFAULT_BRACKET_ATR_MULTIPLE,
+  defaultBracketDistance,
   firstTouch,
   minBracketDistance,
   resolveOhlcTouch,
@@ -25,6 +27,13 @@ describe('bracket distance', () => {
     expect(snapDistance(10.1, 10.25, 0.25)).toBe(10.25);
     expect(snapDistance(10.4, 10.25, 0.25)).toBe(10.5);
     expect(snapDistance(3, 2, 0.25)).toBe(3);
+  });
+
+  it('starts new rounds at 2×ATR on the tick grid', () => {
+    expect(DEFAULT_BRACKET_ATR_MULTIPLE).toBe(2);
+    expect(defaultBracketDistance(10, 10)).toBe(20);
+    expect(defaultBracketDistance(10.01, 10.25)).toBe(20.25);
+    expect(defaultBracketDistance(0, 0.25)).toBe(0.25);
   });
 });
 
