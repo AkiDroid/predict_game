@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { SymbolId, Timeframe } from '../../../../src/lib/types.ts';
 import { TIMEFRAMES } from '../../../../src/lib/types.ts';
+import { requireAuth } from '../auth/plugin.ts';
 
 const SYMBOLS = ['ES', 'NQ'] as const;
 
@@ -17,7 +18,7 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/api/meta',
     {
-      preHandler: requireMarket,
+      preHandler: [requireAuth, requireMarket],
       schema: {
         querystring: {
           type: 'object',
@@ -39,7 +40,7 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/api/bars',
     {
-      preHandler: requireMarket,
+      preHandler: [requireAuth, requireMarket],
       schema: {
         querystring: {
           type: 'object',

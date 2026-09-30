@@ -3,9 +3,11 @@ import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import { loadConfig, type AppConfig } from './config.ts';
 import { dbPlugin } from './plugins/db.ts';
+import { redisPlugin } from './plugins/redis.ts';
 import { authPlugin } from './modules/auth/plugin.ts';
 import { gamePlugin } from './modules/game/plugin.ts';
 import { marketPlugin } from './modules/market/plugin.ts';
+import { statsPlugin } from './modules/stats/plugin.ts';
 import './types.ts';
 
 export interface BuildOptions extends Partial<AppConfig> {
@@ -30,9 +32,19 @@ export async function buildApp(options: BuildOptions = {}) {
     credentials: true,
   });
   await app.register(dbPlugin, { filename: config.databasePath });
-  await app.register(authPlugin);
+  await app.register(redisPlugin, {
+    host: config.redisHost,
+    port: config.redisPort,
+    password: config.redisPassword,
+    db: config.redisDb,
+  });
+  await app.register(authPlugin, {
+    sessionTtlSec: config.sessionTtlSec,
+    cookieSecure: config.cookieSecure,
+  });
   await app.register(marketPlugin, { processedDir: config.processedDir });
   await app.register(gamePlugin);
+  await app.register(statsPlugin);
 
   if (config.serveStatic) {
     await app.register(fastifyStatic, { root: config.distDir });

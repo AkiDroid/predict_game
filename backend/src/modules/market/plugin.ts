@@ -24,5 +24,5 @@ export const marketPlugin = fp(
 
     await marketRoutes(app);
   },
-  { name: 'market', dependencies: ['db'] },
+  { name: 'market', dependencies: ['db', 'auth'] },
 );

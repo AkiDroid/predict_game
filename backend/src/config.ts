@@ -10,6 +10,12 @@ export interface AppConfig {
   distDir: string;
   corsOrigin: string;
   serveStatic: boolean;
+  redisHost: string;
+  redisPort: number;
+  redisPassword: string;
+  redisDb: number;
+  sessionTtlSec: number;
+  cookieSecure: boolean;
 }
 
 export function findRepoRoot(): string {
@@ -45,8 +51,23 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     distDir,
     corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
     serveStatic: serveUi && fs.existsSync(path.join(distDir, 'index.html')),
+    redisHost: process.env.REDIS_HOST ?? '127.0.0.1',
+    redisPort: readInt(process.env.REDIS_PORT, 6379),
+    redisPassword: process.env.REDIS_PASSWORD ?? '',
+    redisDb: readInt(process.env.REDIS_DB, 0),
+    sessionTtlSec: readInt(process.env.SESSION_TTL_SEC, 60 * 60 * 24 * 7),
+    cookieSecure: process.env.COOKIE_SECURE === '1',
   };
   return { ...config, ...overrides };
+}
+
+function readInt(raw: string | undefined, fallback: number): number {
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`无效整数环境变量: ${raw}`);
+  }
+  return n;
 }
 
 function readPort(fallback: number): number {
