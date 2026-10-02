@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { Direction, GameFilters, PlayMode, SymbolId, Timeframe } from '../../../../src/lib/types.ts';
+import type { Direction, GameFilters, PlayMode, SamplingMode, SymbolId, Timeframe } from '../../../../src/lib/types.ts';
 import { TIMEFRAMES } from '../../../../src/lib/types.ts';
 import { requireAuth } from '../auth/plugin.ts';
 
@@ -20,6 +20,9 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
             symbol: { type: 'string', enum: [...SYMBOLS] },
             playTf: { type: 'string', enum: [...TIMEFRAMES] },
             mode: { type: 'string', enum: ['direction', 'bracket'] },
+            sampling: { type: 'string', enum: ['random', 'balanced'] },
+            atrMultiple: { type: 'number', minimum: 1, maximum: 8 },
+            samplingSessionId: { type: 'string', minLength: 8, maxLength: 80 },
             filters: {
               type: 'object',
               additionalProperties: false,
@@ -41,17 +44,18 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
         symbol: SymbolId;
         playTf: Timeframe;
         mode?: PlayMode;
+        sampling?: SamplingMode;
+        atrMultiple?: number;
+        samplingSessionId?: string;
         filters?: GameFilters;
       };
       try {
         const mode = body.mode === 'bracket' ? 'bracket' : 'direction';
-        return app.engine.createRound(
-          body.symbol,
-          body.playTf,
-          body.filters ?? {},
-          mode,
-          request.userId,
-        );
+        return app.engine.createRound(body.symbol, body.playTf, body.filters ?? {}, mode, request.userId, {
+          sampling: body.sampling,
+          atrMultiple: body.atrMultiple,
+          samplingSessionId: body.samplingSessionId,
+        });
       } catch (err) {
         return reply.status(400).send({ error: messageOf(err) });
       }

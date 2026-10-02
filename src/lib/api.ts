@@ -5,6 +5,7 @@ import type {
   GameFilters,
   PlayMode,
   RevealResult,
+  SamplingMode,
   RoundContext,
   RoundRecord,
   SymbolId,
@@ -147,11 +148,30 @@ export async function nextRound(
   playTf: Timeframe,
   filters: GameFilters = {},
   mode: PlayMode = 'direction',
+  draw: {
+    sampling?: SamplingMode;
+    atrMultiple?: number;
+    samplingSessionId?: string;
+  } = {},
 ): Promise<RoundContext> {
+  const payload: {
+    symbol: SymbolId;
+    playTf: Timeframe;
+    filters: GameFilters;
+    mode: PlayMode;
+    sampling?: SamplingMode;
+    atrMultiple?: number;
+    samplingSessionId?: string;
+  } = { symbol, playTf, filters, mode };
+  if (draw.sampling) payload.sampling = draw.sampling;
+  if (draw.atrMultiple != null) payload.atrMultiple = draw.atrMultiple;
+  if (draw.samplingSessionId && draw.samplingSessionId.length >= 8) {
+    payload.samplingSessionId = draw.samplingSessionId;
+  }
   return parse(
     await request('/api/round/next', {
       method: 'POST',
-      body: JSON.stringify({ symbol, playTf, filters, mode }),
+      body: JSON.stringify(payload),
     }),
   );
 }

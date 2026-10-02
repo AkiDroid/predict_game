@@ -2,14 +2,17 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DatePicker } from '../components/DatePicker';
 import { fetchHealth } from '../lib/api';
+import { ATR_MULTIPLE_CHOICES } from '../lib/sampling';
 import { SESSION_LABELS } from '../lib/session';
 import { ALL_SESSIONS, loadSettings, saveSettings, type GameSettings } from '../lib/settings';
 import {
   PLAY_MODE_LABELS,
+  SAMPLING_LABELS,
   SYMBOL_META,
   TIMEFRAMES,
   TIMEFRAME_LABELS,
   type PlayMode,
+  type SamplingMode,
   type SessionBucket,
   type SymbolId,
   type Timeframe,
@@ -53,10 +56,13 @@ export function HomePage() {
       ...settings.filters,
       sessions: sessions.length ? sessions : undefined,
     };
-    const next = { ...settings, filters };
+    const next = { ...settings, filters, samplingSessionId: crypto.randomUUID() };
     saveSettings(next);
     nav('/play', { state: { autoStart: true } });
   }
+
+  const balanced = settings.sampling === 'balanced';
+  const bracketMultiple = settings.bracketAtrMultiple;
 
   return (
     <div className="page">
@@ -92,10 +98,54 @@ export function HomePage() {
               </div>
               <span className="muted" style={{ fontSize: 11 }}>
                 {settings.mode === 'bracket'
-                  ? '在图上拖动止盈、止损。盈亏比固定 1:1，默认距离 2×ATR(14)，不小于 1×ATR(14)。先碰到止盈算赢，先碰到止损算输。'
+                  ? balanced
+                    ? `在图上拖动止盈、止损。盈亏比固定 1:1，初始距离 ${bracketMultiple}×ATR(14)，不小于 1×ATR(14)。先碰到止盈算赢，先碰到止损算输。`
+                    : '在图上拖动止盈、止损。盈亏比固定 1:1，默认距离 2×ATR(14)，不小于 1×ATR(14)。先碰到止盈算赢，先碰到止损算输。'
                   : '判断下一根K线收盘相对开盘是涨还是跌。'}
               </span>
             </div>
+            <div className="field">
+              <label>出题</label>
+              <div className="choice-row">
+                {(Object.keys(SAMPLING_LABELS) as SamplingMode[]).map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={`btn ${settings.sampling === id ? 'btn-primary' : ''}`}
+                    onClick={() => update({ sampling: id })}
+                  >
+                    {SAMPLING_LABELS[id]}
+                  </button>
+                ))}
+              </div>
+              <span className="muted" style={{ fontSize: 11 }}>
+                {balanced
+                  ? settings.mode === 'bracket'
+                    ? '按下面选择的默认距离，价格先碰到上沿或下沿各占一半，顺序打乱，不会上下交替。没在期限内碰到的样本不进这组题。'
+                    : '下一根收涨和收跌各占一半，顺序打乱，不会上下交替。'
+                  : '从符合条件的历史里均匀抽取。'}
+              </span>
+            </div>
+            {settings.mode === 'bracket' && balanced ? (
+              <div className="field">
+                <label>默认 ATR 倍率</label>
+                <div className="choice-row">
+                  {ATR_MULTIPLE_CHOICES.map((multiple) => (
+                    <button
+                      key={multiple}
+                      type="button"
+                      className={`btn btn-sm ${bracketMultiple === multiple ? 'btn-primary' : ''}`}
+                      onClick={() => update({ bracketAtrMultiple: multiple })}
+                    >
+                      {multiple}×
+                    </button>
+                  ))}
+                </div>
+                <span className="muted" style={{ fontSize: 11 }}>
+                  进游戏后止盈和止损的初始距离就是 {bracketMultiple}×ATR(14)。出题也按这个距离判断先碰到哪一边。
+                </span>
+              </div>
+            ) : null}
             <div className="field">
               <label>品种</label>
               <select
@@ -194,6 +244,10 @@ export function HomePage() {
             ATR(14)（按最小跳动向上取整）。之后行情先碰到止盈算赢，先碰到止损算输。先后按 1
             分钟路径判断：跳空看开盘，同一根里两边都碰到时，阳线视为先下后上、阴线视为先上后下。500
             根预测周期K线内都没碰到，记为未触及，不计胜负。
+          </p>
+          <p>
+            <strong>出题：</strong>随机出题是均匀抽取。涨跌各 50% 会把顺序打乱，避免连着出同一边或上下交替。方向题里下一根涨和跌各一半；止盈止损题按所选默认
+            ATR 倍率，先碰到上沿和下沿各一半，这个倍率也是进游戏后的初始距离。
           </p>
           <p>
             <strong>颜色约定：</strong>本产品标的为美股指数期货，采用<strong>绿涨 / 红跌</strong>

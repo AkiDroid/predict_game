@@ -51,6 +51,14 @@ export const PLAY_MODE_LABELS: Record<PlayMode, string> = {
   bracket: '止盈止损',
 };
 
+/** random: uniform draw. balanced: up and down each half, in shuffled order. */
+export type SamplingMode = 'random' | 'balanced';
+
+export const SAMPLING_LABELS: Record<SamplingMode, string> = {
+  random: '随机出题',
+  balanced: '涨跌各 50%',
+};
+
 export type SessionBucket = 'asia' | 'europe' | 'america_rth' | 'america_eth';
 
 export type VolBucket = 'low' | 'mid' | 'high';
@@ -118,6 +126,11 @@ export interface RoundContext {
   dayOfWeek: number;
   /** Minimum 1:1 distance: ATR(14) rounded up to the contract tick. */
   minDistance: number;
+  /**
+   * ATR multiple used as the initial bracket distance.
+   * Balanced bracket rounds use the multiple chosen before the game; other rounds stay at 2.
+   */
+  defaultAtrMultiple: number;
 }
 
 export interface BracketReveal {

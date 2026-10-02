@@ -5,6 +5,7 @@ import { TimeframeBar } from '../components/TimeframeBar';
 import { fetchBars, nextRound, revealBracket, revealRound } from '../lib/api';
 import {
   BRACKET_MAX_BARS,
+  DEFAULT_BRACKET_ATR_MULTIPLE,
   defaultBracketDistance,
   formatAtrMultiple,
   makeBracket,
@@ -14,12 +15,13 @@ import {
 } from '../lib/bracket';
 import { maxVisibleOpen } from '../lib/censor';
 import { SESSION_LABELS } from '../lib/session';
-import { loadSettings } from '../lib/settings';
+import { loadSettings, saveSettings } from '../lib/settings';
 import { computeOverall, currentStreakValue } from '../lib/stats';
 import { appendRound, getStreakBeforeNext, loadRounds } from '../lib/storage';
 import { formatZoned, useTimeZone } from '../lib/timezone';
 import {
   PLAY_MODE_LABELS,
+  SAMPLING_LABELS,
   SYMBOL_META,
   TIMEFRAME_LABELS,
   type Bar,
@@ -69,6 +71,7 @@ export function PlayPage() {
   const actionLock = useRef(false);
   const barsRef = useRef(bars);
   const barsTfRef = useRef<Timeframe | null>(null);
+  const samplingSessionRef = useRef(settings.samplingSessionId);
 
   chartTfRef.current = chartTf;
   barsRef.current = bars;
@@ -122,10 +125,22 @@ export function PlayPage() {
     setFlash(false);
     setPhase('idle');
     try {
-      const round = await nextRound(settings.symbol, settings.playTf, settings.filters, mode);
+      const sampling = settings.sampling === 'balanced' ? 'balanced' : 'random';
+      let samplingSessionId = samplingSessionRef.current;
+      if (sampling === 'balanced' && !samplingSessionId) {
+        samplingSessionId = crypto.randomUUID();
+        samplingSessionRef.current = samplingSessionId;
+        saveSettings({ ...loadSettings(), samplingSessionId });
+      }
+      const round = await nextRound(settings.symbol, settings.playTf, settings.filters, mode, {
+        sampling,
+        atrMultiple: settings.bracketAtrMultiple,
+        samplingSessionId,
+      });
       setCtx(round);
       if (mode === 'bracket') {
-        setBracket({ direction: 'up', distance: defaultBracketDistance(round.atr, round.minDistance) });
+        const multiple = round.defaultAtrMultiple ?? shownAtrMultiple(settings, null);
+        setBracket({ direction: 'up', distance: defaultBracketDistance(round.atr, round.minDistance, multiple) });
       }
       startedAt.current = performance.now();
       await reloadChart(round, null, chartTfRef.current);
@@ -453,6 +468,7 @@ export function PlayPage() {
           </strong>
           <span className="muted" style={{ fontSize: 12 }}>
             {PLAY_MODE_LABELS[mode]} · {TIMEFRAME_LABELS[settings.playTf]}
+            {settings.sampling === 'balanced' ? ` · ${SAMPLING_LABELS.balanced}` : ''}
           </span>
           <TimeframeBar value={chartTf} onChange={setChartTf} />
           <span className="num toolbar-stats">
@@ -495,8 +511,10 @@ export function PlayPage() {
                 {!ctx ? (
                   <p className="muted" style={{ margin: 0, fontSize: 13 }}>
                     {mode === 'bracket'
-                      ? '点击开始后将随机跳转到历史某一时刻。在图上拖动止盈和止损，两者始终等距，默认 2×ATR，且不小于 1×ATR。先碰到止盈算赢，先碰到止损算输。'
-                      : '点击开始后将随机跳转到历史某一时刻，请根据截止前的走势判断下一根预测周期K线方向。拿不准可以跳过，次数不限。'}
+                      ? `点击开始后进入历史某一时刻。止盈和止损等距，初始 ${shownAtrMultiple(settings, ctx)}×ATR，且不小于 1×ATR。先碰到止盈算赢，先碰到止损算输。`
+                      : settings.sampling === 'balanced'
+                        ? '点击开始后进入历史某一时刻。本局下一根涨和跌各占一半，顺序已打乱。拿不准可以跳过，次数不限。'
+                        : '点击开始后将随机跳转到历史某一时刻，请根据截止前的走势判断下一根预测周期K线方向。拿不准可以跳过，次数不限。'}
                   </p>
                 ) : null}
                 <button type="button" className="btn btn-primary" onClick={() => void startRound()}>
@@ -714,6 +732,14 @@ export function PlayPage() {
                 预测周期 <b>{TIMEFRAME_LABELS[settings.playTf]}</b>
               </span>
               <span>
+                出题 <b>{settings.sampling === 'balanced' ? SAMPLING_LABELS.balanced : SAMPLING_LABELS.random}</b>
+              </span>
+              {mode === 'bracket' ? (
+                <span>
+                  默认距离 <b className="num">{shownAtrMultiple(settings, ctx)}×ATR</b>
+                </span>
+              ) : null}
+              <span>
                 图表周期 <b>{TIMEFRAME_LABELS[chartTf]}</b>
               </span>
             </div>
@@ -799,6 +825,14 @@ function mergeBars(prev: Bar[], next: Bar[]): Bar[] {
   for (const bar of prev) map.set(bar.t, bar);
   for (const bar of next) map.set(bar.t, bar);
   return [...map.values()].sort((a, b) => a.t - b.t);
+}
+
+function shownAtrMultiple(
+  settings: { sampling: string; bracketAtrMultiple: number },
+  ctx: { defaultAtrMultiple?: number } | null,
+): number {
+  if (ctx?.defaultAtrMultiple != null) return ctx.defaultAtrMultiple;
+  return settings.sampling === 'balanced' ? settings.bracketAtrMultiple : DEFAULT_BRACKET_ATR_MULTIPLE;
 }
 
 function summarize(mode: PlayMode) {
