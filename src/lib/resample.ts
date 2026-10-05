@@ -17,14 +17,19 @@ export function barEndUnix(barOpen: number, tf: Timeframe): number {
   return barOpen + TF_SECONDS[tf];
 }
 
-/** Clock-aligned bucket start in America/Chicago wall time. */
+/**
+ * Bucket start in America/Chicago wall time. Up to 1h buckets align to the clock;
+ * 4h buckets align to the 17:00 CT session open (17, 21, 01, 05, 09, 13), so none
+ * opens inside the 16:00–17:00 halt.
+ */
 export function bucketStartUnix(unixSec: number, tf: Exclude<Timeframe, '1d'>): number {
   const sec = TF_SECONDS[tf];
   const p = getChicagoParts(unixSec);
   const dayOpen = unixSec - p.hour * 3600 - p.minute * 60 - p.second;
   const sod = p.hour * 3600 + p.minute * 60 + p.second;
-  const bucketSod = Math.floor(sod / sec) * sec;
-  return dayOpen + bucketSod;
+  const anchor = tf === '4h' ? 17 * 3600 : 0;
+  const sinceAnchor = (((sod - anchor) % 86400) + 86400) % 86400;
+  return dayOpen + sod - (sinceAnchor % sec);
 }
 
 function pushAgg(

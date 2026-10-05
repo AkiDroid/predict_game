@@ -33,6 +33,21 @@ describe('resampleOHLCV', () => {
     expect(out[1].v).toBe(7);
   });
 
+  it('anchors 4h buckets at the 17:00 CT session open', () => {
+    const at = (d: number, h: number, m = 0) => Math.floor(chicagoLocalToUtcMs(2024, 6, d, h, m) / 1000);
+    expect(bucketStartUnix(at(2, 17, 0), '4h')).toBe(at(2, 17));
+    expect(bucketStartUnix(at(2, 20, 59), '4h')).toBe(at(2, 17));
+    expect(bucketStartUnix(at(3, 0, 30), '4h')).toBe(at(2, 21));
+    expect(bucketStartUnix(at(3, 8, 30), '4h')).toBe(at(3, 5));
+    expect(bucketStartUnix(at(3, 15, 59), '4h')).toBe(at(3, 13));
+    expect(bucketStartUnix(at(3, 15, 59), '1h')).toBe(at(3, 15));
+    const bars: Bar[] = [];
+    for (let t = at(2, 17); t < at(3, 16); t += 60) bars.push(bar(t, 1, 2, 0.5, 1.5));
+    const out = resampleOHLCV(bars, '4h');
+    expect(out.map((b) => b.t)).toEqual([17, 21, 1, 5, 9, 13].map((h, i) => (i < 2 ? at(2, h) : at(3, h))));
+    for (let i = 1; i < out.length; i++) expect(barEndUnix(out[i - 1].t, '4h')).toBeLessThanOrEqual(out[i].t);
+  });
+
   it('does not invent bars across gaps', () => {
     const a = Math.floor(chicagoLocalToUtcMs(2024, 1, 2, 10, 0) / 1000);
     const b = Math.floor(chicagoLocalToUtcMs(2024, 1, 2, 11, 0) / 1000);

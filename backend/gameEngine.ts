@@ -14,8 +14,7 @@ import {
 import { barEndUnix } from '../src/lib/resample.ts';
 import { normalizeAtrMultiple, pickBalancedDraw, BALANCED_DRAW_LIMIT } from '../src/lib/sampling.ts';
 import { barDirection } from '../src/lib/score.ts';
-import { sessionBucket } from '../src/lib/session.ts';
-import { getChicagoParts, weekdayIndex } from '../src/lib/time.ts';
+import { decisionMeta, sessionBucket, sessionFilterApplies } from '../src/lib/session.ts';
 import type {
   Bar,
   BracketReveal,
@@ -43,9 +42,16 @@ export interface RoundDrawOptions {
   atrMultiple?: number;
 }
 
-interface BracketLabelCache {
-  byIndex: Map<number, 'up' | 'down' | 'none'>;
-}
+type BracketLabels = Map<number, 'up' | 'down' | 'none'>;
+
+const NO_SAMPLES = '没有符合条件的样本（检查日期/时段过滤，或数据是否已预处理）';
+const SESSION_ORDER: SessionBucket[] = ['asia', 'europe', 'america_rth', 'america_eth'];
+const SESSION_CODE = Object.fromEntries(SESSION_ORDER.map((s, i) => [s, i])) as Record<SessionBucket, number>;
+const ALL_SESSIONS_MASK = (1 << SESSION_ORDER.length) - 1;
+const SESSION_REJECTION_TRIES = 64;
+/** Balanced bracket labels: at most this many symbol/tf/multiple maps, each holding this many entries. */
+export const BRACKET_LABEL_MAPS = 16;
+export const BRACKET_LABELS_PER_MAP = 50_000;
 
 export class GameEngine {
   private series = new Map<string, BarSeries>();
@@ -53,8 +59,9 @@ export class GameEngine {
   private readonly random: () => number;
   private volThresholds = new Map<string, { lowMax: number; midMax: number }>();
   private rangeThresholds = new Map<string, { lowMax: number; midMax: number }>();
-  private eligibleCache = new Map<string, number[]>();
-  private bracketLabels = new Map<string, BracketLabelCache>();
+  private basePools = new Map<string, Int32Array>();
+  private sessionCodeCache = new Map<string, Uint8Array>();
+  private bracketLabels = new Map<string, BracketLabels>();
 
   constructor(rounds: RoundStore, random: () => number = Math.random) {
     this.rounds = rounds;
@@ -124,31 +131,15 @@ export class GameEngine {
     );
   }
 
-  private passesFilters(
-    t: number,
-    filters: GameFilters,
-    sessionSet: Set<SessionBucket> | null,
-  ): boolean {
-    if (filters.dateFrom != null && t < filters.dateFrom) return false;
-    if (filters.dateTo != null && t > filters.dateTo) return false;
-    if (sessionSet && !sessionSet.has(sessionBucket(t))) return false;
-    return true;
-  }
-
-  private buildEligible(
-    symbol: SymbolId,
-    playTf: Timeframe,
-    filters: GameFilters,
-    mode: PlayMode,
-  ): number[] {
-    const cacheKey = JSON.stringify({ symbol, playTf, filters, mode });
-    const cached = this.eligibleCache.get(cacheKey);
+  /** Sorted last-bar indices that can start a round, before any user filter. One per symbol/tf/mode. */
+  private basePool(symbol: SymbolId, playTf: Timeframe, mode: PlayMode): Int32Array {
+    const key = `${symbol}:${playTf}:${mode}`;
+    const cached = this.basePools.get(key);
     if (cached) return cached;
 
     const s = this.getSeries(symbol, playTf);
-    const sessionSet = filters.sessions?.length ? new Set(filters.sessions) : null;
-    const out: number[] = [];
-
+    const out = new Int32Array(Math.max(0, s.length));
+    let n = 0;
     if (mode === 'bracket') {
       const trRing = new Float64Array(ATR_PERIOD);
       let sum = 0;
@@ -159,18 +150,94 @@ export class GameEngine {
         if (i > ATR_PERIOD) sum -= trRing[slot];
         trRing[slot] = tr;
         if (i < MIN_CONTEXT || !(sum > 0)) continue;
-        if (!this.passesFilters(s.t[i], filters, sessionSet)) continue;
-        out.push(i);
+        out[n++] = i;
       }
     } else {
       for (let i = MIN_CONTEXT; i < s.length - 1; i++) {
         if (s.c[i + 1] === s.o[i + 1]) continue;
-        if (!this.passesFilters(s.t[i], filters, sessionSet)) continue;
-        out.push(i);
+        out[n++] = i;
       }
     }
-    this.eligibleCache.set(cacheKey, out);
-    return out;
+    const pool = out.slice(0, n);
+    this.basePools.set(key, pool);
+    return pool;
+  }
+
+  /** Session code (index into SESSION_ORDER) of each bar's open time. One per symbol/tf. */
+  private sessionCodes(symbol: SymbolId, tf: Timeframe): Uint8Array {
+    const key = `${symbol}:${tf}`;
+    const cached = this.sessionCodeCache.get(key);
+    if (cached) return cached;
+    const s = this.getSeries(symbol, tf);
+    const codes = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) codes[i] = SESSION_CODE[sessionBucket(s.t[i])];
+    this.sessionCodeCache.set(key, codes);
+    return codes;
+  }
+
+  /**
+   * Uniform sampler over eligible last-bar indices whose decision time — the
+   * predicted bar's open, `t[i + 1]` — passes the date and session filters.
+   * Dates narrow the cached pool by binary search; sessions use rejection
+   * sampling with an exact counting fallback, so nothing per-request is cached.
+   */
+  private eligibleSampler(
+    symbol: SymbolId,
+    playTf: Timeframe,
+    filters: GameFilters,
+    mode: PlayMode,
+  ): () => number {
+    const s = this.getSeries(symbol, playTf);
+    const pool = this.basePool(symbol, playTf, mode);
+    let lo = 0;
+    let hi = pool.length;
+    if (filters.dateFrom != null) {
+      lo = lowerBound(pool, s.indexAtOrAfter(filters.dateFrom) - 1);
+    }
+    if (filters.dateTo != null) {
+      hi = lowerBound(pool, s.indexAtOrAfter(Math.floor(filters.dateTo) + 1) - 1);
+    }
+    if (lo >= hi) throw new Error(NO_SAMPLES);
+    const span = hi - lo;
+
+    let mask = 0;
+    if (sessionFilterApplies(playTf)) {
+      for (const session of filters.sessions ?? []) mask |= 1 << SESSION_CODE[session];
+    }
+    if (mask === 0 || mask === ALL_SESSIONS_MASK) {
+      return () => pool[lo + Math.floor(this.random() * span)]!;
+    }
+
+    const codes = this.sessionCodes(symbol, playTf);
+    const matches = (i: number) => ((mask >> codes[i + 1]!) & 1) === 1;
+    let total = -1;
+    return () => {
+      for (let n = 0; n < SESSION_REJECTION_TRIES; n++) {
+        const i = pool[lo + Math.floor(this.random() * span)]!;
+        if (matches(i)) return i;
+      }
+      if (total < 0) {
+        total = 0;
+        for (let p = lo; p < hi; p++) if (matches(pool[p]!)) total++;
+      }
+      if (total === 0) throw new Error(NO_SAMPLES);
+      let k = Math.floor(this.random() * total);
+      for (let p = lo; p < hi; p++) {
+        if (matches(pool[p]!) && k-- === 0) return pool[p]!;
+      }
+      throw new Error(NO_SAMPLES);
+    };
+  }
+
+  cacheSizes(): { pools: number; sessionCodes: number; bracketMaps: number; bracketLabels: number } {
+    let bracketLabels = 0;
+    for (const m of this.bracketLabels.values()) bracketLabels += m.size;
+    return {
+      pools: this.basePools.size,
+      sessionCodes: this.sessionCodeCache.size,
+      bracketMaps: this.bracketLabels.size,
+      bracketLabels,
+    };
   }
 
   countPending(): number {
@@ -208,7 +275,6 @@ export class GameEngine {
     const atrPct = lastBar.c > 0 ? a / lastBar.c : 0;
     const th = this.volThresholds.get(`${symbol}:${playTf}`)!;
     const volBucket = volBucketFromAtrPct(atrPct, th.lowMax, th.midMax);
-    const parts = getChicagoParts(lastBar.t);
 
     // recent return using proxy
     let recent = 0;
@@ -243,9 +309,7 @@ export class GameEngine {
       atrPct,
       recentReturn: recent,
       volBucket,
-      session: sessionBucket(lastBar.t),
-      hour: parts.hour,
-      dayOfWeek: weekdayIndex(lastBar.t),
+      ...decisionMeta(cutoff, playTf),
       minDistance: minBracketDistance(a, PRICE_TICK),
       defaultAtrMultiple: atrMultiple,
     };
@@ -277,7 +341,6 @@ export class GameEngine {
     const body = Math.abs(nextBar.c - nextBar.o);
     const rth = this.rangeThresholds.get(`${p.symbol}:${p.playTf}`)!;
     const rangeBucket = rangeBucketFromBody(body, rth.lowMax, rth.midMax);
-    const parts = getChicagoParts(p.cutoff);
 
     const nextBarEnd = barEndUnix(nextBar.t, p.playTf);
     return {
@@ -286,9 +349,7 @@ export class GameEngine {
       correct,
       predicted,
       meta: {
-        session: sessionBucket(p.cutoff),
-        hour: parts.hour,
-        dayOfWeek: weekdayIndex(p.cutoff),
+        ...decisionMeta(p.cutoff, p.playTf),
         barRange: body,
         rangeBucket,
         volBucket: p.volBucket,
@@ -341,7 +402,6 @@ export class GameEngine {
     const correct = outcome === 'tp' ? true : outcome === 'sl' ? false : null;
     const actual: Direction | null =
       outcome === 'unresolved' ? null : outcome === 'tp' ? direction : direction === 'up' ? 'down' : 'up';
-    const parts = getChicagoParts(p.cutoff);
     return {
       outcome,
       correct,
@@ -358,9 +418,7 @@ export class GameEngine {
       revealUntil,
       hitBar,
       meta: {
-        session: sessionBucket(p.cutoff),
-        hour: parts.hour,
-        dayOfWeek: weekdayIndex(p.cutoff),
+        ...decisionMeta(p.cutoff, p.playTf),
         barRange: hitBar ? Math.abs(hitBar.c - hitBar.o) : 0,
         rangeBucket: null,
         volBucket: p.volBucket,
@@ -435,15 +493,12 @@ export class GameEngine {
     mode: PlayMode,
     atrMultiple: number,
   ): number {
-    const eligible = this.buildEligible(symbol, playTf, filters, mode);
-    if (eligible.length === 0) {
-      throw new Error('没有符合条件的样本（检查日期/时段过滤，或数据是否已预处理）');
-    }
+    const draw = this.eligibleSampler(symbol, playTf, filters, mode);
     const labels = mode === 'bracket' ? this.bracketLabelCache(symbol, playTf, atrMultiple) : null;
     const series = mode === 'direction' ? this.getSeries(symbol, playTf) : null;
     return pickBalancedDraw(
       this.random,
-      () => eligible[Math.floor(this.random() * eligible.length)]!,
+      draw,
       (index) => {
         if (mode === 'bracket') {
           const side = this.bracketSide(labels!, symbol, playTf, index, atrMultiple);
@@ -456,30 +511,34 @@ export class GameEngine {
   }
 
   private pickRandomIndex(symbol: SymbolId, playTf: Timeframe, filters: GameFilters, mode: PlayMode): number {
-    const eligible = this.buildEligible(symbol, playTf, filters, mode);
-    if (eligible.length === 0) {
-      throw new Error('没有符合条件的样本（检查日期/时段过滤，或数据是否已预处理）');
-    }
-    return eligible[Math.floor(this.random() * eligible.length)]!;
+    return this.eligibleSampler(symbol, playTf, filters, mode)();
   }
 
-  private bracketLabelCache(symbol: SymbolId, playTf: Timeframe, atrMultiple: number): BracketLabelCache {
+  private bracketLabelCache(symbol: SymbolId, playTf: Timeframe, atrMultiple: number): BracketLabels {
     const key = `${symbol}:${playTf}:${atrMultiple}`;
     const cached = this.bracketLabels.get(key);
-    if (cached) return cached;
-    const created: BracketLabelCache = { byIndex: new Map() };
+    if (cached) {
+      this.bracketLabels.delete(key);
+      this.bracketLabels.set(key, cached);
+      return cached;
+    }
+    if (this.bracketLabels.size >= BRACKET_LABEL_MAPS) {
+      const oldest = this.bracketLabels.keys().next().value;
+      if (oldest != null) this.bracketLabels.delete(oldest);
+    }
+    const created: BracketLabels = new Map();
     this.bracketLabels.set(key, created);
     return created;
   }
 
   private bracketSide(
-    labels: BracketLabelCache,
+    labels: BracketLabels,
     symbol: SymbolId,
     playTf: Timeframe,
     lastIdx: number,
     atrMultiple: number,
   ): 'up' | 'down' | 'none' {
-    const cached = labels.byIndex.get(lastIdx);
+    const cached = labels.get(lastIdx);
     if (cached) return cached;
     const play = this.getSeries(symbol, playTf);
     const entry = play.c[lastIdx];
@@ -488,7 +547,8 @@ export class GameEngine {
     const distance = defaultBracketDistance(atr, minD, atrMultiple, PRICE_TICK);
     const hit = this.findBracketTouch(symbol, playTf, lastIdx, entry + distance, entry - distance);
     const label: 'up' | 'down' | 'none' = hit == null ? 'none' : hit.outcome === 'tp' ? 'up' : 'down';
-    labels.byIndex.set(lastIdx, label);
+    if (labels.size >= BRACKET_LABELS_PER_MAP) labels.clear();
+    labels.set(lastIdx, label);
     return label;
   }
 
@@ -552,4 +612,16 @@ export class GameEngine {
     if (!round) throw new Error('回合已失效，请开始新一局');
     return round;
   }
+}
+
+/** First position in a sorted array whose value is >= `value`. */
+function lowerBound(sorted: Int32Array, value: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sorted[mid]! < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }

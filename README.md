@@ -51,9 +51,13 @@ npm run dev                   # 前端 http://localhost:5173 ，API http://127.0
 MM/DD/YYYY,HH:mm,open,high,low,close,volume
 ```
 
-**时区：** 时间戳按 `America/Chicago`（CME）解释。界面显示此时区。
+**时区：** 原始文本里的时间是**美东时间**（`America/New_York`）：每天 17:00–17:59 ET 缺数据（CME 16:00–17:00 CT 休市），09:30 与 15:59 成交量突增（现货开收盘），周日首根 18:00。预处理按美东解析并存成 UTC 秒；之后的交易日、时段、K 线边界都按 `America/Chicago`（CME）计算，界面默认显示 Chicago 时间。
 
-**会话 / 日线：** Globex 风格交易日在 **17:00 CT** 换日。日线聚合该交易日开盘（前一日 17:00）至收盘（当日 17:00，不含）内的全部 1 分钟 bar。不跨会话空洞伪造 K 线。
+**会话 / 日线：** Globex 风格交易日在 **17:00 CT** 换日。日线聚合该交易日开盘（前一日 17:00）至收盘（当日 17:00，不含）内的全部 1 分钟 bar。4 小时线从 17:00 CT 起算（17、21、01、05、09、13 点），其余周期按整点对齐。不跨会话空洞伪造 K 线。
+
+**时段（Chicago 时间，按目标 K 线开盘时刻判断）：** 亚洲 17:00–02:59，欧洲 03:00–08:29，美洲 RTH 08:30–14:59（现货 08:30–15:00），美洲 ETH 15:00–16:59（现货收盘后到 16:00 休市）。日线题都在 17:00 开盘时决策，时段过滤对日线不生效；日线的星期按交易日算。
+
+改过解析规则后必须重新执行 `npm run preprocess`。旧版本（按 Chicago 解析原始文本）存下的对局记录，`cutoff` 比实际晚一小时，小时、时段（4h / 日线还有星期）也随之偏移，统计里这部分不准。
 
 预处理输出：`data/processed/{ES,NQ}/{1m,5m,15m,30m,1h,4h,1d}.bin`（已加入 `.gitignore`）。
 
@@ -82,14 +86,15 @@ MM/DD/YYYY,HH:mm,open,high,low,close,volume
 需要先注册 / 登录。Session 保存在 **Redis**（httpOnly cookie `sid`），用户账户与对局统计保存在 **SQLite**。
 
 - `POST /api/auth/register`、`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/me`
-- `GET/POST/DELETE /api/stats/rounds`、`POST /api/stats/migrate`（一次性上传旧版 localStorage 记录）
+- `GET/POST/DELETE /api/stats/rounds`、`POST /api/stats/migrate`（一次性上传旧版 localStorage 记录）。单条记录序列化后不超过 4 KB，每个用户最多 10 万条
+- 服务端出题记录（`rounds` 表）揭晓或过期 7 天后自动删除
 - 出题 / 揭晓 / K 线接口需登录；未登录返回 401，前端跳转登录页
 
 统计分析页包含：
 
 - 总体：局数、胜负、胜率、当前/最长连胜连败、近 20/50/100 局胜率
 - 按品种、预测周期、答题时图表周期
-- 按小时（Chicago）、时段（亚洲 / 欧洲 / 美洲 RTH / 美洲 ETH）、星期
+- 按小时（Chicago）、时段（亚洲 / 欧洲 / 美洲 RTH / 美洲 ETH）、星期，均按目标 K 线开盘时刻
 - 按预测方向、实际方向（暴露偏好）
 - 按先验波动分位（ATR% 三分位）、揭晓后实体大小（标注为事后分析）
 - 权益曲线（+1/−1）与滚动胜率、最近对局表、文字读数（n≥30 才比较强弱；附近似 Wilson 95% 区间）

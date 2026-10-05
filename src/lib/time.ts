@@ -2,21 +2,26 @@
 
 const TZ = 'America/Chicago';
 
-const chicagoFormatter = new Intl.DateTimeFormat('en-US', {
-  timeZone: TZ,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  hourCycle: 'h23',
-  weekday: 'short',
-});
+function zoneFormatter(timeZone: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    weekday: 'short',
+  });
+}
 
-function partsOf(ms: number): Record<string, string> {
+const chicagoFormatter = zoneFormatter(TZ);
+const easternFormatter = zoneFormatter('America/New_York');
+
+function partsOf(ms: number, formatter = chicagoFormatter): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const p of chicagoFormatter.formatToParts(new Date(ms))) {
+  for (const p of formatter.formatToParts(new Date(ms))) {
     if (p.type !== 'literal') out[p.type] = p.value;
   }
   return out;
@@ -31,9 +36,21 @@ export function chicagoLocalToUtcMs(
   minute: number,
   second = 0,
 ): number {
+  return zonedLocalToUtcMs(chicagoFormatter, year, month, day, hour, minute, second);
+}
+
+function zonedLocalToUtcMs(
+  formatter: Intl.DateTimeFormat,
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+): number {
   let guess = Date.UTC(year, month - 1, day, hour + 6, minute, second);
   for (let i = 0; i < 4; i++) {
-    const p = partsOf(guess);
+    const p = partsOf(guess, formatter);
     const asUtc = Date.UTC(
       Number(p.year),
       Number(p.month) - 1,
@@ -48,17 +65,42 @@ export function chicagoLocalToUtcMs(
   return guess;
 }
 
+/**
+ * Raw `*_1min.txt` rows are US Eastern wall time (the 17:00–17:59 ET daily halt is
+ * missing and cash opens at 09:30). Returns UTC unix seconds.
+ */
 export function parseDataTimestamp(dateStr: string, timeStr: string): number {
   const [mm, dd, yyyy] = dateStr.split('/').map(Number);
   const [hh, mi] = timeStr.split(':').map(Number);
-  return Math.floor(chicagoLocalToUtcMs(yyyy, mm, dd, hh, mi) / 1000);
+  return easternLocalToUnix(yyyy, mm, dd, hh, mi);
 }
 
+/** Daily file rows carry only the trade date; returns that session's open (17:00 CT the day before). */
 export function parseDailyDate(dateStr: string): number {
   const [mm, dd, yyyy] = dateStr.split('/').map(Number);
-  // Daily file date ≈ trade/session date; use session open = prior calendar day 17:00 CT
-  const openMs = chicagoLocalToUtcMs(yyyy, mm, dd, 17, 0) - 24 * 3600 * 1000;
-  return Math.floor(openMs / 1000);
+  return sessionOpenUnix(`${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`);
+}
+
+/**
+ * America/New_York wall time → UTC unix seconds using the US DST rules (see
+ * `usDstBounds`). Nonexistent spring-forward times shift forward an hour;
+ * repeated fall-back times resolve to the first (daylight-time) occurrence.
+ */
+export function easternLocalToUnix(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second = 0,
+): number {
+  if (year < 1987) {
+    return Math.floor(zonedLocalToUtcMs(easternFormatter, year, month, day, hour, minute, second) / 1000);
+  }
+  const wall = Date.UTC(year, month - 1, day, hour, minute, second) / 1000;
+  const asDst = wall + 4 * 3600;
+  const { start, end } = usDstBounds(year, -5);
+  return asDst >= start && asDst < end ? asDst : asDst + 3600;
 }
 
 export interface ChicagoParts {
@@ -93,7 +135,7 @@ export function chicagoOffsetSeconds(unixSec: number): number {
     offsetYearEnd = Date.UTC(year + 1, 0, 1) / 1000;
     offsetLegacy = year < 1987;
     if (!offsetLegacy) {
-      const bounds = chicagoDstBounds(year);
+      const bounds = usDstBounds(year, -6);
       offsetDstStart = bounds.start;
       offsetDstEnd = bounds.end;
     }
@@ -117,16 +159,19 @@ function chicagoOffsetFromParts(unixSec: number): number {
   return Math.round(wall - whole);
 }
 
-function chicagoDstBounds(year: number): { start: number; end: number } {
+/** UTC instants [start, end) of US daylight time for a zone with the given standard offset (hours). */
+function usDstBounds(year: number, stdOffsetHours: number): { start: number; end: number } {
+  const startHour = 2 - stdOffsetHours;
+  const endHour = 1 - stdOffsetHours;
   if (year >= 2007) {
     return {
-      start: Date.UTC(year, 2, nthSunday(year, 2, 2), 8, 0, 0) / 1000,
-      end: Date.UTC(year, 10, nthSunday(year, 10, 1), 7, 0, 0) / 1000,
+      start: Date.UTC(year, 2, nthSunday(year, 2, 2), startHour, 0, 0) / 1000,
+      end: Date.UTC(year, 10, nthSunday(year, 10, 1), endHour, 0, 0) / 1000,
     };
   }
   return {
-    start: Date.UTC(year, 3, nthSunday(year, 3, 1), 8, 0, 0) / 1000,
-    end: Date.UTC(year, 9, lastSunday(year, 9), 7, 0, 0) / 1000,
+    start: Date.UTC(year, 3, nthSunday(year, 3, 1), startHour, 0, 0) / 1000,
+    end: Date.UTC(year, 9, lastSunday(year, 9), endHour, 0, 0) / 1000,
   };
 }
 
@@ -206,4 +251,10 @@ export function weekdayIndex(unixSec: number): number {
     Sat: 6,
   };
   return map[getChicagoParts(unixSec).weekday] ?? 0;
+}
+
+/** 0=Sun ... 6=Sat of the CME trade date the instant belongs to. */
+export function tradeDateWeekday(unixSec: number): number {
+  const [y, m, d] = tradeDateKey(unixSec).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
 }

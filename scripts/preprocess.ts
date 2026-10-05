@@ -22,6 +22,7 @@ async function parse1m(filePath: string): Promise<Bar[]> {
   const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   let lineNo = 0;
+  let dropped = 0;
   for await (const line of rl) {
     lineNo++;
     const trimmed = line.trim();
@@ -31,8 +32,15 @@ async function parse1m(filePath: string): Promise<Bar[]> {
       throw new Error(`${filePath}:${lineNo} bad columns: ${trimmed.slice(0, 80)}`);
     }
     const [date, time, o, h, l, c, v] = parts;
+    const t = parseDataTimestamp(date, time);
+    const prev = bars[bars.length - 1];
+    if (prev && t <= prev.t) {
+      // Repeated wall-clock minutes (DST fall-back) would break the sorted series.
+      dropped++;
+      continue;
+    }
     bars.push({
-      t: parseDataTimestamp(date, time),
+      t,
       o: Number(o),
       h: Number(h),
       l: Number(l),
@@ -43,6 +51,7 @@ async function parse1m(filePath: string): Promise<Bar[]> {
       console.log(`  ... ${lineNo.toLocaleString()} lines`);
     }
   }
+  if (dropped) console.warn(`  dropped ${dropped} out-of-order rows`);
   return bars;
 }
 
@@ -76,8 +85,11 @@ async function processSymbol(symbol: SymbolId): Promise<void> {
   // Meta JSON
   const meta = {
     symbol,
+    sourceTimezone: 'America/New_York',
     timezone: 'America/Chicago',
-    session: 'CME Globex; trade date rolls at 17:00 CT; daily bars aggregate session open→close',
+    session:
+      'CME Globex; raw rows are US Eastern wall time, stored as UTC; trade date rolls at 17:00 CT; ' +
+      'RTH 08:30–15:00 CT, daily halt 16:00–17:00 CT; 4h bars anchor at 17:00 CT; daily bars aggregate session open→close',
     count1m: bars1m.length,
     from: bars1m[0]?.t ?? 0,
     to: bars1m[bars1m.length - 1]?.t ?? 0,

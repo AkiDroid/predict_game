@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { DatePicker } from '../components/DatePicker';
 import { fetchHealth } from '../lib/api';
 import { ATR_MULTIPLE_CHOICES } from '../lib/sampling';
-import { SESSION_LABELS } from '../lib/session';
+import { SESSION_HOURS, SESSION_LABELS } from '../lib/session';
 import { ALL_SESSIONS, loadSettings, saveSettings, type GameSettings } from '../lib/settings';
 import {
   PLAY_MODE_LABELS,
@@ -204,6 +204,7 @@ export function HomePage() {
                       key={s}
                       type="button"
                       className={`btn btn-sm ${on ? 'btn-primary' : 'btn-ghost'}`}
+                      title={`Chicago ${SESSION_HOURS[s]}`}
                       onClick={() =>
                         setSessions((prev) =>
                           on ? prev.filter((x) => x !== s) : [...prev, s],
@@ -216,7 +217,9 @@ export function HomePage() {
                 })}
               </div>
               <span className="muted" style={{ fontSize: 11 }}>
-                默认不限制（使用全部可用数据）。时段按时区 America/Chicago 划分。
+                默认不限制（使用全部可用数据）。按目标K线开盘时刻、America/Chicago 时间划分：亚洲 17:00–02:59，欧洲
+                03:00–08:29，RTH 08:30–14:59（现货开盘时段），ETH 15:00–16:59（16:00–17:00 休市）。
+                {settings.playTf === '1d' ? ' 日线每题都在 17:00 开盘时决策，时段过滤不生效。' : ''}
               </span>
             </div>
             <div className="action-row">

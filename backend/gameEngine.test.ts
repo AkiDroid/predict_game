@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GameEngine } from './gameEngine.ts';
+import { BRACKET_LABEL_MAPS, BRACKET_LABELS_PER_MAP, GameEngine } from './gameEngine.ts';
 import { BarSeries } from './binary.ts';
 import type { RoundStore, StoredRound } from './roundStore.ts';
 import { BRACKET_MAX_BARS, firstTouch } from '../src/lib/bracket.ts';
@@ -102,8 +102,76 @@ describe('eligible samples', () => {
     const engine = new GameEngine(new MemoryRounds(), () => 0);
     engine.setSeries('ES', '1m', new BarSeries(bars));
     const round = engine.createRound('ES', '1m', { sessions: ['america_rth'] }, 'direction');
-    expect(round.lastBar.t).toBe(start + 510 * 60);
-    expect(sessionBucket(round.lastBar.t)).toBe('america_rth');
+    expect(round.cutoff).toBe(start + 510 * 60);
+    expect(round.lastBar.t).toBe(start + 509 * 60);
+    expect(round.session).toBe('america_rth');
+    expect(sessionBucket(round.cutoff)).toBe('america_rth');
+    expect(engine.reveal(round.roundId, 'up').meta.session).toBe('america_rth');
+  });
+
+  it('draws only cutoffs inside the date and session filters, uniformly', () => {
+    const start = Math.floor(chicagoLocalToUtcMs(2024, 6, 3, 0, 0) / 1000);
+    const bars: Bar[] = [];
+    for (let i = 0; i < 3 * 24 * 60; i++) bars.push({ t: start + i * 60, o: 100, h: 101, l: 99, c: 101, v: 1 });
+    const engine = new GameEngine(new MemoryRounds(), mulberry32(11));
+    engine.setSeries('ES', '1m', new BarSeries(bars));
+    const dateFrom = start + 24 * 3600 + 30;
+    const dateTo = start + 2 * 24 * 3600 - 1;
+    const filters = { dateFrom, dateTo, sessions: ['america_eth' as const] };
+    const seen = new Map<number, number>();
+    for (let n = 0; n < 1200; n++) {
+      const round = engine.createRound('ES', '1m', filters, 'direction');
+      expect(round.cutoff).toBeGreaterThanOrEqual(dateFrom);
+      expect(round.cutoff).toBeLessThanOrEqual(dateTo);
+      expect(round.session).toBe('america_eth');
+      seen.set(round.cutoff, (seen.get(round.cutoff) ?? 0) + 1);
+    }
+    // 15:00–16:59 CT on the one day in range: 120 possible cutoffs, ~10 draws each.
+    expect(seen.size).toBe(120);
+    expect(Math.max(...seen.values())).toBeLessThan(30);
+
+    expect(() => engine.createRound('ES', '1m', { dateFrom: start + 10 * 24 * 3600 }, 'direction')).toThrow(
+      '没有符合条件的样本',
+    );
+    expect(() =>
+      engine.createRound('ES', '1m', { dateFrom, dateTo: dateFrom + 3600, sessions: ['america_rth'] }, 'direction'),
+    ).toThrow('没有符合条件的样本');
+  });
+
+  it('keeps caches bounded across arbitrary date filters', () => {
+    const bars: Bar[] = [];
+    for (let i = 0; i < 2000; i++) bars.push(bar(i, 100, 102, 98, i % 2 ? 101 : 99));
+    const engine = new GameEngine(new MemoryRounds(), mulberry32(3));
+    engine.setSeries('ES', '1m', new BarSeries(bars));
+    for (let n = 0; n < 300; n++) {
+      const dateFrom = T0 + (250 + n) * 60;
+      engine.createRound('ES', '1m', { dateFrom, dateTo: dateFrom + 600 + n, sessions: ['asia', 'europe'] }, 'direction');
+      engine.createRound('ES', '1m', { dateFrom, dateTo: dateFrom + 600 + n }, 'bracket', null, {
+        sampling: 'balanced',
+        atrMultiple: 1 + (n % 700) / 100,
+      });
+    }
+    const sizes = engine.cacheSizes();
+    expect(sizes.pools).toBe(2);
+    expect(sizes.sessionCodes).toBe(1);
+    expect(sizes.bracketMaps).toBeLessThanOrEqual(BRACKET_LABEL_MAPS);
+    expect(sizes.bracketLabels).toBeLessThanOrEqual(BRACKET_LABEL_MAPS * BRACKET_LABELS_PER_MAP);
+  });
+
+  it('ignores session filters on daily rounds and labels them by trade date', () => {
+    const bars: Bar[] = [];
+    for (let d = 0; d < 400; d++) {
+      const open = Math.floor(chicagoLocalToUtcMs(2023, 1, 1 + d, 17, 0) / 1000);
+      bars.push({ t: open, o: 100, h: 102, l: 98, c: d % 2 ? 101 : 99, v: 1 });
+    }
+    const engine = new GameEngine(new MemoryRounds(), mulberry32(7));
+    engine.setSeries('ES', '1d', new BarSeries(bars));
+    for (let n = 0; n < 20; n++) {
+      const round = engine.createRound('ES', '1d', { sessions: ['america_rth'] }, 'direction');
+      const trade = new Date((round.cutoff + 24 * 3600) * 1000);
+      expect(round.dayOfWeek).toBe(new Date(Date.UTC(trade.getUTCFullYear(), trade.getUTCMonth(), trade.getUTCDate())).getUTCDay());
+      expect(engine.reveal(round.roundId, 'up').meta.dayOfWeek).toBe(round.dayOfWeek);
+    }
   });
 });
 
