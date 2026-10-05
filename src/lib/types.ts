@@ -51,7 +51,7 @@ export const PLAY_MODE_LABELS: Record<PlayMode, string> = {
   bracket: '止盈止损',
 };
 
-/** random: uniform draw. balanced: up and down each half, in shuffled order. */
+/** random: uniform draw. balanced: coin-flip a side, then redraw until it matches. */
 export type SamplingMode = 'random' | 'balanced';
 
 export const SAMPLING_LABELS: Record<SamplingMode, string> = {

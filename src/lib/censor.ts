@@ -6,9 +6,7 @@ import { barEndUnix } from './resample';
  * T = open time of the play-timeframe bar being predicted.
  * A bar is visible iff its period fully ends at or before T (barEnd <= T).
  */
-export function censorBars(bars: Bar[], tf: Timeframe, cutoffExclusive: number): Bar[] {
-  if (bars.length === 0) return bars;
-  // Binary search last visible
+function lastVisibleIndex(bars: readonly { t: number }[], tf: Timeframe, cutoffExclusive: number): number {
   let lo = 0;
   let hi = bars.length - 1;
   let last = -1;
@@ -21,14 +19,19 @@ export function censorBars(bars: Bar[], tf: Timeframe, cutoffExclusive: number):
       hi = mid - 1;
     }
   }
+  return last;
+}
+
+export function censorBars(bars: Bar[], tf: Timeframe, cutoffExclusive: number): Bar[] {
+  if (bars.length === 0) return bars;
+  const last = lastVisibleIndex(bars, tf, cutoffExclusive);
   return last < 0 ? [] : bars.slice(0, last + 1);
 }
 
 /** Max timestamp (open) still allowed on this TF under cutoff T. */
 export function maxVisibleOpen(tf: Timeframe, cutoffExclusive: number, probeBars: Bar[]): number | null {
-  const censored = censorBars(probeBars, tf, cutoffExclusive);
-  if (censored.length === 0) return null;
-  return censored[censored.length - 1].t;
+  const last = lastVisibleIndex(probeBars, tf, cutoffExclusive);
+  return last < 0 ? null : probeBars[last].t;
 }
 
 export function assertNoLeakage(bars: Bar[], tf: Timeframe, cutoffExclusive: number): boolean {

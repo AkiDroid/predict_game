@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { CandleChart, type ChartBracket } from '../components/CandleChart';
 import { TimeframeBar } from '../components/TimeframeBar';
@@ -450,6 +450,11 @@ export function PlayPage() {
     setBracket({ direction: next.direction, distance: next.distance });
   }, []);
 
+  const anchorTime = useMemo(
+    () => (mode === 'bracket' && ctx ? maxVisibleOpen(chartTf, ctx.cutoff, bars) : null),
+    [mode, ctx, chartTf, bars],
+  );
+
   const watermark =
     ctx && phase === 'deciding'
       ? mode === 'bracket'
@@ -501,7 +506,7 @@ export function PlayPage() {
           onNeedMoreHistory={onNeedMore}
           bracket={chartBracket}
           onBracketChange={onBracketChange}
-          anchorTime={mode === 'bracket' && ctx ? maxVisibleOpen(chartTf, ctx.cutoff, bars) : null}
+          anchorTime={anchorTime}
         />
 
         <div className="play-footer">
@@ -513,7 +518,7 @@ export function PlayPage() {
                     {mode === 'bracket'
                       ? `点击开始后进入历史某一时刻。止盈和止损等距，初始 ${shownAtrMultiple(settings, ctx)}×ATR，且不小于 1×ATR。先碰到止盈算赢，先碰到止损算输。`
                       : settings.sampling === 'balanced'
-                        ? '点击开始后进入历史某一时刻。本局下一根涨和跌各占一半，顺序已打乱。拿不准可以跳过，次数不限。'
+                        ? '点击开始后进入历史某一时刻。本局先随机决定涨或跌再抽题，方向不对会重抽。拿不准可以跳过，次数不限。'
                         : '点击开始后将随机跳转到历史某一时刻，请根据截止前的走势判断下一根预测周期K线方向。拿不准可以跳过，次数不限。'}
                   </p>
                 ) : null}

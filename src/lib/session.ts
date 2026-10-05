@@ -1,5 +1,5 @@
 import type { SessionBucket } from './types';
-import { getChicagoParts } from './time';
+import { chicagoOffsetSeconds } from './time';
 
 /**
  * Session buckets in America/Chicago local time:
@@ -9,8 +9,10 @@ import { getChicagoParts } from './time';
  * - america_eth: 16:00–16:59 (post-RTH before daily break)
  */
 export function sessionBucket(unixSec: number): SessionBucket {
-  const { hour, minute } = getChicagoParts(unixSec);
-  const m = hour * 60 + minute;
+  const local = unixSec + chicagoOffsetSeconds(unixSec);
+  const wrapped = local % 86400;
+  const sod = wrapped >= 0 ? wrapped : wrapped + 86400;
+  const m = Math.floor(sod / 60);
   if (m >= 17 * 60 || m < 3 * 60) return 'asia';
   if (m < 8 * 60 + 30) return 'europe';
   if (m < 16 * 60) return 'america_rth';

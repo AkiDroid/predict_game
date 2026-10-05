@@ -11,10 +11,9 @@ import {
   resolveOhlcTouch,
   snapDistance,
 } from '../src/lib/bracket.ts';
-import { censorBars } from '../src/lib/censor.ts';
 import { barEndUnix } from '../src/lib/resample.ts';
-import { normalizeAtrMultiple, pickFresh, SideDeck } from '../src/lib/sampling.ts';
-import { barDirection, isDoji } from '../src/lib/score.ts';
+import { normalizeAtrMultiple, pickBalancedDraw, BALANCED_DRAW_LIMIT } from '../src/lib/sampling.ts';
+import { barDirection } from '../src/lib/score.ts';
 import { sessionBucket } from '../src/lib/session.ts';
 import { getChicagoParts, weekdayIndex } from '../src/lib/time.ts';
 import type {
@@ -36,8 +35,6 @@ import { rangeBucketFromBody, tercileThresholds, volBucketFromAtrPct } from '../
 
 const MIN_CONTEXT = 200;
 const ATR_PERIOD = 14;
-const BRACKET_PROBE_LIMIT = 80;
-const MAX_BALANCE_SESSIONS = 200;
 
 export interface RoundDrawOptions {
   sampling?: SamplingMode;
@@ -48,7 +45,6 @@ export interface RoundDrawOptions {
 
 interface BracketLabelCache {
   byIndex: Map<number, 'up' | 'down' | 'none'>;
-  pools: { up: number[]; down: number[] };
 }
 
 export class GameEngine {
@@ -58,9 +54,7 @@ export class GameEngine {
   private volThresholds = new Map<string, { lowMax: number; midMax: number }>();
   private rangeThresholds = new Map<string, { lowMax: number; midMax: number }>();
   private eligibleCache = new Map<string, number[]>();
-  private directionPools = new Map<string, { up: number[]; down: number[] }>();
   private bracketLabels = new Map<string, BracketLabelCache>();
-  private decks = new Map<string, SideDeck>();
 
   constructor(rounds: RoundStore, random: () => number = Math.random) {
     this.rounds = rounds;
@@ -156,22 +150,21 @@ export class GameEngine {
     const out: number[] = [];
 
     if (mode === 'bracket') {
+      const trRing = new Float64Array(ATR_PERIOD);
       let sum = 0;
-      let count = 0;
       for (let i = 1; i < s.length - 1; i++) {
-        sum += this.trAt(s, i);
-        count++;
-        if (count > ATR_PERIOD) {
-          sum -= this.trAt(s, i - ATR_PERIOD);
-          count--;
-        }
+        const tr = this.trAt(s, i);
+        sum += tr;
+        const slot = (i - 1) % ATR_PERIOD;
+        if (i > ATR_PERIOD) sum -= trRing[slot];
+        trRing[slot] = tr;
         if (i < MIN_CONTEXT || !(sum > 0)) continue;
         if (!this.passesFilters(s.t[i], filters, sessionSet)) continue;
         out.push(i);
       }
     } else {
       for (let i = MIN_CONTEXT; i < s.length - 1; i++) {
-        if (isDoji(s.at(i + 1))) continue;
+        if (s.c[i + 1] === s.o[i + 1]) continue;
         if (!this.passesFilters(s.t[i], filters, sessionSet)) continue;
         out.push(i);
       }
@@ -200,7 +193,7 @@ export class GameEngine {
         : DEFAULT_BRACKET_ATR_MULTIPLE;
     const lastIdx =
       sampling === 'balanced'
-        ? this.pickBalancedIndex(symbol, playTf, filters, mode, userId, draw.samplingSessionId, atrMultiple)
+        ? this.pickBalancedIndex(symbol, playTf, filters, mode, atrMultiple)
         : this.pickRandomIndex(symbol, playTf, filters, mode);
     const nextIdx = lastIdx + 1;
     const s = this.getSeries(symbol, playTf);
@@ -393,26 +386,35 @@ export class GameEngine {
     const s = this.getSeries(opts.symbol, opts.tf);
     const limit = Math.min(opts.limit ?? 500, 8000);
 
-    // Determine exclusive end index in series by open time window
     let endIdx = s.length;
-    if (opts.before != null) {
-      endIdx = s.indexAtOrAfter(opts.before);
-    }
+    if (opts.before != null) endIdx = s.indexAtOrAfter(opts.before);
+    if (opts.cutoff != null) endIdx = this.visibleEnd(s, opts.tf, opts.cutoff, endIdx);
 
-    let candidates: Bar[];
-    if (opts.cutoff != null) {
-      candidates = censorBars(s.slice(0, endIdx), opts.tf, opts.cutoff);
-    } else {
-      candidates = s.slice(0, endIdx);
-    }
-
+    let startIdx = 0;
     if (opts.after != null) {
-      const i = candidates.findIndex((b) => b.t >= opts.after!);
-      candidates = i < 0 ? [] : candidates.slice(i);
-      return candidates.slice(0, limit);
+      startIdx = s.indexAtOrAfter(opts.after);
+      if (startIdx >= endIdx) return [];
+      return s.slice(startIdx, Math.min(endIdx, startIdx + limit));
     }
+    startIdx = Math.max(0, endIdx - limit);
+    return s.slice(startIdx, endIdx);
+  }
 
-    return candidates.slice(Math.max(0, candidates.length - limit));
+  /** Exclusive end index of bars whose period ends at or before `cutoff`, clipped to `endIdx`. */
+  private visibleEnd(s: BarSeries, tf: Timeframe, cutoff: number, endIdx: number): number {
+    let lo = 0;
+    let hi = endIdx - 1;
+    let last = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (barEndUnix(s.t[mid], tf) <= cutoff) {
+        last = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return last + 1;
   }
 
   getMeta(symbol: SymbolId, tf: Timeframe) {
@@ -426,13 +428,31 @@ export class GameEngine {
     };
   }
 
-  /** Sides dealt to a balanced session, in order. Used to check the shuffle stayed 50/50. */
-  balancedSidesDealt(samplingSessionId: string): Direction[] {
-    const sides: Direction[] = [];
-    for (const [key, deck] of this.decks) {
-      if (key.includes(samplingSessionId)) sides.push(...deck.served);
+  private pickBalancedIndex(
+    symbol: SymbolId,
+    playTf: Timeframe,
+    filters: GameFilters,
+    mode: PlayMode,
+    atrMultiple: number,
+  ): number {
+    const eligible = this.buildEligible(symbol, playTf, filters, mode);
+    if (eligible.length === 0) {
+      throw new Error('没有符合条件的样本（检查日期/时段过滤，或数据是否已预处理）');
     }
-    return sides;
+    const labels = mode === 'bracket' ? this.bracketLabelCache(symbol, playTf, atrMultiple) : null;
+    const series = mode === 'direction' ? this.getSeries(symbol, playTf) : null;
+    return pickBalancedDraw(
+      this.random,
+      () => eligible[Math.floor(this.random() * eligible.length)]!,
+      (index) => {
+        if (mode === 'bracket') {
+          const side = this.bracketSide(labels!, symbol, playTf, index, atrMultiple);
+          return side === 'none' ? null : side;
+        }
+        return barDirection(series!.at(index + 1));
+      },
+      BALANCED_DRAW_LIMIT,
+    );
   }
 
   private pickRandomIndex(symbol: SymbolId, playTf: Timeframe, filters: GameFilters, mode: PlayMode): number {
@@ -443,106 +463,11 @@ export class GameEngine {
     return eligible[Math.floor(this.random() * eligible.length)]!;
   }
 
-  private pickBalancedIndex(
-    symbol: SymbolId,
-    playTf: Timeframe,
-    filters: GameFilters,
-    mode: PlayMode,
-    userId: string | null,
-    samplingSessionId: string | undefined,
-    atrMultiple: number,
-  ): number {
-    const sessionId = samplingSessionId?.trim() ?? '';
-    if (!/^[A-Za-z0-9-]{8,80}$/.test(sessionId)) {
-      throw new Error('缺少本局出题会话，请从设置页重新开始');
-    }
-    const deck = this.takeDeck(
-      JSON.stringify({ userId, sessionId, symbol, playTf, mode, filters, atrMultiple }),
-    );
-    const side = deck.peek();
-    const index =
-      mode === 'bracket'
-        ? this.pickBalancedBracket(symbol, playTf, filters, atrMultiple, side, deck)
-        : this.pickBalancedDirection(symbol, playTf, filters, side, deck);
-    deck.markUsed(index);
-    deck.commit();
-    return index;
-  }
-
-  private pickBalancedDirection(
-    symbol: SymbolId,
-    playTf: Timeframe,
-    filters: GameFilters,
-    side: Direction,
-    deck: SideDeck,
-  ): number {
-    const pools = this.directionSides(symbol, playTf, filters);
-    if (pools.up.length === 0 || pools.down.length === 0) {
-      throw new Error('当前条件下涨和跌样本不都够，无法按各 50% 出题。可以改成随机出题，或放宽日期和时段。');
-    }
-    const pool = pools[side];
-    return (
-      pickFresh(pool, (index) => deck.hasUsed(index), this.random) ??
-      pool[Math.floor(this.random() * pool.length)]!
-    );
-  }
-
-  private directionSides(
-    symbol: SymbolId,
-    playTf: Timeframe,
-    filters: GameFilters,
-  ): { up: number[]; down: number[] } {
-    const key = JSON.stringify({ symbol, playTf, filters, kind: 'direction-side' });
-    const cached = this.directionPools.get(key);
-    if (cached) return cached;
-    const eligible = this.buildEligible(symbol, playTf, filters, 'direction');
-    const s = this.getSeries(symbol, playTf);
-    const up: number[] = [];
-    const down: number[] = [];
-    for (const index of eligible) {
-      const dir = barDirection(s.at(index + 1));
-      if (dir === 'up') up.push(index);
-      else if (dir === 'down') down.push(index);
-    }
-    const pools = { up, down };
-    this.directionPools.set(key, pools);
-    return pools;
-  }
-
-  private pickBalancedBracket(
-    symbol: SymbolId,
-    playTf: Timeframe,
-    filters: GameFilters,
-    atrMultiple: number,
-    side: Direction,
-    deck: SideDeck,
-  ): number {
-    const eligible = this.buildEligible(symbol, playTf, filters, 'bracket');
-    if (eligible.length === 0) {
-      throw new Error('没有符合条件的样本（检查日期/时段过滤，或数据是否已预处理）');
-    }
-    const labels = this.bracketLabelCache(symbol, playTf, atrMultiple);
-    for (let n = 0; n < BRACKET_PROBE_LIMIT; n++) {
-      const index = eligible[Math.floor(this.random() * eligible.length)]!;
-      if (deck.hasUsed(index)) continue;
-      if (this.bracketSide(labels, symbol, playTf, index, atrMultiple) === side) return index;
-    }
-    const known = pickFresh(labels.pools[side], (index) => deck.hasUsed(index), this.random);
-    if (known != null) return known;
-    if (labels.pools.up.length === 0 || labels.pools.down.length === 0) {
-      throw new Error('按这个 ATR 倍率，很少能在期限内先碰到某一边。换一个倍率，或改成随机出题。');
-    }
-    throw new Error('这个 ATR 倍率下，先碰到某一边的新样本不够了。换一个倍率，或重新开始一局。');
-  }
-
   private bracketLabelCache(symbol: SymbolId, playTf: Timeframe, atrMultiple: number): BracketLabelCache {
     const key = `${symbol}:${playTf}:${atrMultiple}`;
     const cached = this.bracketLabels.get(key);
     if (cached) return cached;
-    const created: BracketLabelCache = {
-      byIndex: new Map(),
-      pools: { up: [], down: [] },
-    };
+    const created: BracketLabelCache = { byIndex: new Map() };
     this.bracketLabels.set(key, created);
     return created;
   }
@@ -564,7 +489,6 @@ export class GameEngine {
     const hit = this.findBracketTouch(symbol, playTf, lastIdx, entry + distance, entry - distance);
     const label: 'up' | 'down' | 'none' = hit == null ? 'none' : hit.outcome === 'tp' ? 'up' : 'down';
     labels.byIndex.set(lastIdx, label);
-    if (label !== 'none') labels.pools[label].push(lastIdx);
     return label;
   }
 
@@ -585,9 +509,35 @@ export class GameEngine {
     const maxIdx = Math.min(play.length - 1, nextIdx + BRACKET_MAX_BARS - 1);
     if (maxIdx < nextIdx) return null;
     const scanUntil = barEndUnix(play.t[maxIdx], playTf);
-    const start = m1.indexAtOrAfter(play.t[nextIdx]);
+    let i = m1.indexAtOrAfter(play.t[nextIdx]);
     let prev = play.c[lastIdx];
-    for (let i = start; i < m1.length; i++) {
+    if (playTf !== '1m') {
+      // A play bar's 1m path stays inside [min(prevClose, low), max(prevClose, high)].
+      // Bars that miss both prices are jumped by time instead of walked minute by minute.
+      for (let j = nextIdx; j <= maxIdx && i < m1.length; j++) {
+        const windowEnd = j === maxIdx ? scanUntil : play.t[j + 1];
+        const lo = Math.min(prev, play.l[j]);
+        const hi = Math.max(prev, play.h[j]);
+        const reaches = (takeProfit >= lo && takeProfit <= hi) || (stopLoss >= lo && stopLoss <= hi);
+        if (!reaches) {
+          const next = m1.indexAtOrAfter(windowEnd);
+          if (next > i) {
+            prev = m1.c[next - 1];
+            i = next;
+          }
+          continue;
+        }
+        for (; i < m1.length; i++) {
+          const t = m1.t[i];
+          if (t >= windowEnd) break;
+          const touch = resolveOhlcTouch(prev, m1.o[i], m1.h[i], m1.l[i], m1.c[i], takeProfit, stopLoss);
+          if (touch) return { outcome: touch, hitTime: t };
+          prev = m1.c[i];
+        }
+      }
+      return null;
+    }
+    for (; i < m1.length; i++) {
       const t = m1.t[i];
       if (t >= scanUntil) break;
       const touch = resolveOhlcTouch(prev, m1.o[i], m1.h[i], m1.l[i], m1.c[i], takeProfit, stopLoss);
@@ -595,19 +545,6 @@ export class GameEngine {
       prev = m1.c[i];
     }
     return null;
-  }
-
-  private takeDeck(key: string): SideDeck {
-    const existing = this.decks.get(key);
-    if (existing) return existing;
-    const deck = new SideDeck(this.random);
-    this.decks.set(key, deck);
-    while (this.decks.size > MAX_BALANCE_SESSIONS) {
-      const oldest = this.decks.keys().next().value;
-      if (oldest === undefined) break;
-      this.decks.delete(oldest);
-    }
-    return deck;
   }
 
   private requirePending(roundId: string): StoredRound {

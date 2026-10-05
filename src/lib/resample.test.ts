@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { censorBars, assertNoLeakage } from './censor';
+import { censorBars, assertNoLeakage, maxVisibleOpen } from './censor';
 import { resampleOHLCV, barEndUnix, bucketStartUnix } from './resample';
 import { barDirection, isDoji, isWin, scoreRound } from './score';
 import { computeOverall, computeStats } from './stats';
@@ -55,6 +55,8 @@ describe('censor', () => {
     const cutoff = t0 + 600;
     const visible = censorBars(bars5, '5m', cutoff);
     expect(visible.map((b) => b.t)).toEqual([t0, t0 + 300]);
+    expect(maxVisibleOpen('5m', cutoff, bars5)).toBe(t0 + 300);
+    expect(maxVisibleOpen('5m', t0, bars5)).toBe(null);
     expect(assertNoLeakage(visible, '5m', cutoff)).toBe(true);
 
     // Lower TF: 1m bars inside the predicted 5m candle must be hidden

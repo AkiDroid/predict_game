@@ -3,8 +3,7 @@ import { GameEngine } from './gameEngine.ts';
 import { BarSeries } from './binary.ts';
 import type { RoundStore, StoredRound } from './roundStore.ts';
 import { defaultBracketDistance } from '../src/lib/bracket.ts';
-import { BALANCED_BLOCK, isStrictlyAlternating } from '../src/lib/sampling.ts';
-import type { Bar, Direction } from '../src/lib/types.ts';
+import type { Bar } from '../src/lib/types.ts';
 
 const T0 = 1_700_000_000;
 
@@ -67,69 +66,65 @@ function bracketSeries(count: number): BarSeries {
 }
 
 describe('balanced question draws', () => {
-  it('splits direction questions evenly and does not alternate', () => {
-    const engine = new GameEngine(new MemoryRounds());
+  it('redraws until the coin-flip side matches, then stops', () => {
+    let calls = 0;
+    const engine = new GameEngine(new MemoryRounds(), () => {
+      calls += 1;
+      if (calls === 1) return 0.2;
+      if (calls === 2) return 0;
+      return 0.02;
+    });
     engine.setSeries('ES', '1m', directionSeries(280, (i) => i % 2 === 0));
-    const actual: Direction[] = [];
-    for (let i = 0; i < BALANCED_BLOCK; i++) {
-      const round = engine.createRound('ES', '1m', {}, 'direction', 'user-1', {
-        sampling: 'balanced',
-        samplingSessionId: 'direction-session-1',
-      });
-      expect(round.defaultAtrMultiple).toBe(2);
-      actual.push(engine.reveal(round.roundId, 'up').actual);
-    }
-    expect(actual.filter((side) => side === 'up')).toHaveLength(BALANCED_BLOCK / 2);
-    expect(actual.filter((side) => side === 'down')).toHaveLength(BALANCED_BLOCK / 2);
-    expect(actual).toEqual(engine.balancedSidesDealt('direction-session-1'));
-    expect(isStrictlyAlternating(actual)).toBe(false);
+    const round = engine.createRound('ES', '1m', {}, 'direction', 'user-1', {
+      sampling: 'balanced',
+      samplingSessionId: 'direction-session-1',
+    });
+    expect(engine.reveal(round.roundId, 'up').actual).toBe('up');
+    expect(calls).toBe(3);
   });
 
-  it('refuses a 50/50 direction game when one side is missing', () => {
-    const engine = new GameEngine(new MemoryRounds());
+  it('keeps the 15th draw when the target side never appears', () => {
+    let calls = 0;
+    const engine = new GameEngine(new MemoryRounds(), () => {
+      calls += 1;
+      return calls === 1 ? 0.9 : 0;
+    });
     engine.setSeries('ES', '1m', directionSeries(280, () => true));
-    expect(() =>
-      engine.createRound('ES', '1m', {}, 'direction', 'user-1', {
-        sampling: 'balanced',
-        samplingSessionId: 'direction-session-2',
-      }),
-    ).toThrow(/涨和跌/);
+    const round = engine.createRound('ES', '1m', {}, 'direction', 'user-1', {
+      sampling: 'balanced',
+      samplingSessionId: 'direction-session-2',
+    });
+    expect(engine.reveal(round.roundId, 'up').actual).toBe('up');
+    expect(calls).toBe(16);
   });
 
-  it('splits bracket first-touch sides at the chosen ATR multiple and uses that default', () => {
-    const engine = new GameEngine(new MemoryRounds());
-    const series = bracketSeries(900);
-    engine.setSeries('ES', '1m', series);
-    const sides: Direction[] = [];
-    for (let i = 0; i < BALANCED_BLOCK; i++) {
-      const round = engine.createRound('ES', '1m', {}, 'bracket', 'user-1', {
-        sampling: 'balanced',
-        samplingSessionId: 'bracket-session-1',
-        atrMultiple: 1,
-      });
-      expect(round.defaultAtrMultiple).toBe(1);
-      const distance = defaultBracketDistance(round.atr, round.minDistance, round.defaultAtrMultiple);
-      const revealed = engine.revealBracket(round.roundId, 'up', distance);
-      expect(revealed.distance).toBe(distance);
-      expect(revealed.outcome === 'tp' || revealed.outcome === 'sl').toBe(true);
-      sides.push(revealed.outcome === 'tp' ? 'up' : 'down');
-    }
-    expect(sides.filter((side) => side === 'up')).toHaveLength(BALANCED_BLOCK / 2);
-    expect(sides.filter((side) => side === 'down')).toHaveLength(BALANCED_BLOCK / 2);
-    expect(sides).toEqual(engine.balancedSidesDealt('bracket-session-1'));
-    expect(isStrictlyAlternating(sides)).toBe(false);
-  });
-
-  it('does not treat a wide ATR multiple as a hit when price never gets there', () => {
+  it('uses the chosen ATR multiple as the bracket default', () => {
     const engine = new GameEngine(new MemoryRounds());
     engine.setSeries('ES', '1m', bracketSeries(900));
-    expect(() =>
-      engine.createRound('ES', '1m', {}, 'bracket', 'user-1', {
-        sampling: 'balanced',
-        samplingSessionId: 'bracket-session-wide',
-        atrMultiple: 5,
-      }),
-    ).toThrow(/ATR 倍率/);
+    const round = engine.createRound('ES', '1m', {}, 'bracket', 'user-1', {
+      sampling: 'balanced',
+      samplingSessionId: 'bracket-session-1',
+      atrMultiple: 1,
+    });
+    expect(round.defaultAtrMultiple).toBe(1);
+    const distance = defaultBracketDistance(round.atr, round.minDistance, round.defaultAtrMultiple);
+    const revealed = engine.revealBracket(round.roundId, 'up', distance);
+    expect(revealed.distance).toBe(distance);
+    expect(revealed.outcome === 'tp' || revealed.outcome === 'sl').toBe(true);
+  });
+
+  it('returns the last draw when a wide ATR multiple is never touched', () => {
+    const engine = new GameEngine(new MemoryRounds());
+    engine.setSeries('ES', '1m', bracketSeries(900));
+    const round = engine.createRound('ES', '1m', {}, 'bracket', 'user-1', {
+      sampling: 'balanced',
+      samplingSessionId: 'bracket-session-wide',
+      atrMultiple: 5,
+    });
+    expect(round.defaultAtrMultiple).toBe(5);
+    const distance = defaultBracketDistance(round.atr, round.minDistance, round.defaultAtrMultiple);
+    const revealed = engine.revealBracket(round.roundId, 'up', distance);
+    expect(revealed.outcome).toBe('unresolved');
   });
 
   it('keeps random bracket rounds on the 2×ATR default', () => {

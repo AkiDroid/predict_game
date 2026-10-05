@@ -32,7 +32,25 @@ export function encodeBars(symbol: string, tf: string, bars: Bar[]): Buffer {
   return buf;
 }
 
-export function decodeBars(buf: Buffer): { symbol: string; tf: string; bars: Bar[] } {
+interface PbarHeader {
+  symbol: string;
+  tf: string;
+  count: number;
+  offset: number;
+}
+
+interface PackedColumns {
+  t: Int32Array;
+  o: Float32Array;
+  h: Float32Array;
+  l: Float32Array;
+  c: Float32Array;
+  v: Float32Array;
+}
+
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+function readHeader(buf: Buffer): PbarHeader {
   let o = 0;
   const magic = buf.readUInt32LE(o); o += 4;
   if (magic !== MAGIC) throw new Error('Invalid PBAR magic');
@@ -43,30 +61,65 @@ export function decodeBars(buf: Buffer): { symbol: string; tf: string; bars: Bar
   const symbol = buf.subarray(o, o + symLen).toString('utf8'); o += symLen;
   const tfLen = buf.readUInt32LE(o); o += 4;
   const tf = buf.subarray(o, o + tfLen).toString('utf8'); o += tfLen;
+  return { symbol, tf, count, offset: o };
+}
 
-  const times = new Int32Array(count);
-  for (let i = 0; i < count; i++) times[i] = buf.readInt32LE(o + i * 4);
-  o += count * 4;
-  const opens = new Float32Array(count);
-  for (let i = 0; i < count; i++) opens[i] = buf.readFloatLE(o + i * 4);
-  o += count * 4;
-  const highs = new Float32Array(count);
-  for (let i = 0; i < count; i++) highs[i] = buf.readFloatLE(o + i * 4);
-  o += count * 4;
-  const lows = new Float32Array(count);
-  for (let i = 0; i < count; i++) lows[i] = buf.readFloatLE(o + i * 4);
-  o += count * 4;
-  const closes = new Float32Array(count);
-  for (let i = 0; i < count; i++) closes[i] = buf.readFloatLE(o + i * 4);
-  o += count * 4;
-  const vols = new Float32Array(count);
-  for (let i = 0; i < count; i++) vols[i] = buf.readFloatLE(o + i * 4);
+type ColumnCtor<T extends Int32Array | Float32Array> = {
+  new (length: number): T;
+  new (buffer: ArrayBufferLike, byteOffset: number, length: number): T;
+};
 
-  const bars: Bar[] = new Array(count);
-  for (let i = 0; i < count; i++) {
-    bars[i] = { t: times[i], o: opens[i], h: highs[i], l: lows[i], c: closes[i], v: vols[i] };
+/** Copy one PBAR column. Aligned little-endian input is a single memcpy. */
+function copyColumn<T extends Int32Array | Float32Array>(
+  buf: Buffer,
+  offset: number,
+  count: number,
+  Ctor: ColumnCtor<T>,
+  read: (byteOffset: number) => number,
+): T {
+  const out = new Ctor(count);
+  if (count === 0) return out;
+  const nbytes = count * 4;
+  if (offset < 0 || offset + nbytes > buf.length) throw new RangeError('truncated PBAR column');
+  const start = buf.byteOffset + offset;
+  if (LITTLE_ENDIAN && (start & 3) === 0) {
+    out.set(new Ctor(buf.buffer, start, count));
+    return out;
   }
-  return { symbol, tf, bars };
+  if (LITTLE_ENDIAN) {
+    const bytes = new Uint8Array(count * 4);
+    bytes.set(buf.subarray(offset, offset + count * 4));
+    out.set(new Ctor(bytes.buffer, 0, count));
+    return out;
+  }
+  for (let i = 0; i < count; i++) out[i] = read(offset + i * 4);
+  return out;
+}
+
+function readColumns(buf: Buffer, offset: number, count: number): PackedColumns {
+  let o = offset;
+  const t = copyColumn(buf, o, count, Int32Array, (at) => buf.readInt32LE(at));
+  o += count * 4;
+  const open = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  o += count * 4;
+  const h = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  o += count * 4;
+  const l = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  o += count * 4;
+  const c = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  o += count * 4;
+  const v = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  return { t, o: open, h, l, c, v };
+}
+
+export function decodeBars(buf: Buffer): { symbol: string; tf: string; bars: Bar[] } {
+  const header = readHeader(buf);
+  const cols = readColumns(buf, header.offset, header.count);
+  const bars: Bar[] = new Array(header.count);
+  for (let i = 0; i < header.count; i++) {
+    bars[i] = { t: cols.t[i], o: cols.o[i], h: cols.h[i], l: cols.l[i], c: cols.c[i], v: cols.v[i] };
+  }
+  return { symbol: header.symbol, tf: header.tf, bars };
 }
 
 /** Compact in-memory columnar store for fast slicing. */
@@ -79,7 +132,17 @@ export class BarSeries {
   readonly v: Float32Array;
   readonly length: number;
 
-  constructor(bars: Bar[]) {
+  constructor(bars: Bar[], packed?: PackedColumns) {
+    if (packed) {
+      this.length = packed.t.length;
+      this.t = packed.t;
+      this.o = packed.o;
+      this.h = packed.h;
+      this.l = packed.l;
+      this.c = packed.c;
+      this.v = packed.v;
+      return;
+    }
     const n = bars.length;
     this.length = n;
     this.t = new Int32Array(n);
@@ -100,7 +163,8 @@ export class BarSeries {
   }
 
   static fromBuffer(buf: Buffer): BarSeries {
-    return new BarSeries(decodeBars(buf).bars);
+    const header = readHeader(buf);
+    return new BarSeries([], readColumns(buf, header.offset, header.count));
   }
 
   at(i: number): Bar {
