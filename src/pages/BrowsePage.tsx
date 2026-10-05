@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { CandleChart } from '../components/CandleChart';
 import { TimeframeBar } from '../components/TimeframeBar';
 import { fetchBars, fetchHealth } from '../lib/api';
@@ -15,20 +15,24 @@ export function BrowsePage() {
   const [bars, setBars] = useState<Bar[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  /** Bumped per symbol/tf load; responses from an older one are dropped. */
+  const loadSeq = useRef(0);
 
   const loadTail = useCallback(async (sym: SymbolId, timeframe: Timeframe) => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError(null);
     try {
       const h = await fetchHealth();
       if (!h.ok) throw new Error(h.error || '数据未就绪');
       const data = await fetchBars({ symbol: sym, tf: timeframe, limit: 800 });
-      setBars(data);
+      if (seq === loadSeq.current) setBars(data);
     } catch (e) {
+      if (seq !== loadSeq.current) return;
       setError(e instanceof Error ? e.message : String(e));
       setBars([]);
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, []);
 
@@ -38,6 +42,7 @@ export function BrowsePage() {
 
   const onNeedMore = useCallback(
     async (oldest: number) => {
+      const seq = loadSeq.current;
       try {
         const older = await fetchBars({
           symbol,
@@ -45,7 +50,7 @@ export function BrowsePage() {
           before: oldest,
           limit: 500,
         });
-        if (!older.length) return;
+        if (seq !== loadSeq.current || !older.length) return;
         setBars((prev) => {
           const map = new Map<number, Bar>();
           for (const b of older) map.set(b.t, b);

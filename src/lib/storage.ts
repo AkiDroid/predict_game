@@ -1,6 +1,7 @@
 import type { PlayMode, RoundRecord } from './types';
 import { currentStreakValue } from './stats';
 import {
+  ApiError,
   clearRoundsApi,
   fetchRounds,
   migrateRounds,
@@ -27,8 +28,13 @@ export async function hydrateRounds(): Promise<RoundRecord[]> {
 }
 
 export async function appendRound(round: RoundRecord): Promise<RoundRecord[]> {
-  await postRound(round);
-  cache = [...cache, round];
+  try {
+    await postRound(round);
+  } catch (err) {
+    // 409: an earlier attempt was stored but its response was lost.
+    if (!(err instanceof ApiError && err.status === 409)) throw err;
+  }
+  if (!cache.some((r) => r.id === round.id)) cache = [...cache, round];
   return cache;
 }
 

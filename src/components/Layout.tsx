@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 
 export function Layout() {
-  const { user, logout } = useAuth();
+  const { user, logout, syncError, retrySync } = useAuth();
   const nav = useNavigate();
 
   async function onLogout() {
@@ -43,6 +43,14 @@ export function Layout() {
         </div>
       </header>
       <main className="app-main">
+        {syncError ? (
+          <div className="error-banner">
+            {syncError}。统计与连胜可能不完整。{' '}
+            <button type="button" className="btn btn-sm" onClick={() => void retrySync()}>
+              重试
+            </button>
+          </div>
+        ) : null}
         <Outlet />
       </main>
     </div>

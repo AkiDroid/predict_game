@@ -20,10 +20,13 @@ import { migrateLocalIfNeeded, setRoundsCache } from './storage';
 type AuthState = {
   user: AuthUser | null;
   loading: boolean;
+  /** Set when the session is fine but loading or migrating round history failed. */
+  syncError: string | null;
   login: (username: string, password: string) => Promise<void>;
   register: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
+  retrySync: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -31,67 +34,93 @@ const AuthContext = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  const syncRounds = useCallback(async () => {
     try {
-      const me = await fetchMe();
-      setUser(me);
       await migrateLocalIfNeeded();
+      setSyncError(null);
     } catch (err) {
-      setUser(null);
-      setRoundsCache([]);
-      if (!(err instanceof ApiError && err.status === 401)) {
-        console.error(err);
-      }
+      console.error(err);
+      setSyncError(`对局记录同步失败：${err instanceof Error ? err.message : String(err)}`);
     }
   }, []);
+
+  const signedOut = useCallback(() => {
+    setUser(null);
+    setRoundsCache([]);
+    setSyncError(null);
+  }, []);
+
+  /** Only a 401 from /api/auth/me means signed out; other failures keep the current state. */
+  const loadMe = useCallback(async (): Promise<AuthUser | null | undefined> => {
+    try {
+      return await fetchMe();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return null;
+      console.error(err);
+      return undefined;
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    const me = await loadMe();
+    if (me === undefined) return;
+    if (me === null) {
+      signedOut();
+      return;
+    }
+    setUser(me);
+    await syncRounds();
+  }, [loadMe, signedOut, syncRounds]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const me = await fetchMe();
-        if (cancelled) return;
+      const me = await loadMe();
+      if (cancelled) return;
+      if (me) {
         setUser(me);
-        await migrateLocalIfNeeded();
-      } catch {
-        if (!cancelled) {
-          setUser(null);
-          setRoundsCache([]);
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
+        await syncRounds();
+      } else {
+        signedOut();
       }
+      if (!cancelled) setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadMe, signedOut, syncRounds]);
 
-  const login = useCallback(async (username: string, password: string) => {
-    const me = await loginUser(username, password);
-    setUser(me);
-    await migrateLocalIfNeeded();
-  }, []);
+  const login = useCallback(
+    async (username: string, password: string) => {
+      const me = await loginUser(username, password);
+      setUser(me);
+      await syncRounds();
+    },
+    [syncRounds],
+  );
 
-  const register = useCallback(async (username: string, password: string) => {
-    const me = await registerUser(username, password);
-    setUser(me);
-    await migrateLocalIfNeeded();
-  }, []);
+  const register = useCallback(
+    async (username: string, password: string) => {
+      const me = await registerUser(username, password);
+      setUser(me);
+      await syncRounds();
+    },
+    [syncRounds],
+  );
 
   const logout = useCallback(async () => {
     try {
       await logoutUser();
     } finally {
-      setUser(null);
-      setRoundsCache([]);
+      signedOut();
     }
-  }, []);
+  }, [signedOut]);
 
   const value = useMemo(
-    () => ({ user, loading, login, register, logout, refresh }),
-    [user, loading, login, register, logout, refresh],
+    () => ({ user, loading, syncError, login, register, logout, refresh, retrySync: syncRounds }),
+    [user, loading, syncError, login, register, logout, refresh, syncRounds],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

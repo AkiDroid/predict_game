@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { CandleChart, type ChartBracket } from '../components/CandleChart';
 import { TimeframeBar } from '../components/TimeframeBar';
-import { fetchBars, nextRound, revealBracket, revealRound } from '../lib/api';
+import { ApiError, fetchBars, nextRound, revealBracket, revealRound } from '../lib/api';
 import {
   BRACKET_MAX_BARS,
   DEFAULT_BRACKET_ATR_MULTIPLE,
@@ -25,6 +25,7 @@ import {
   SYMBOL_META,
   TIMEFRAME_LABELS,
   type Bar,
+  type BracketReveal,
   type Direction,
   type PlayMode,
   type RoundContext,
@@ -53,7 +54,7 @@ type PlayResult = {
 export function PlayPage() {
   const nav = useNavigate();
   const location = useLocation();
-  const settings = loadSettings();
+  const [settings] = useState(loadSettings);
   const [timeZone] = useTimeZone();
   const mode: PlayMode = settings.mode === 'bracket' ? 'bracket' : 'direction';
   const [chartTf, setChartTf] = useState<Timeframe>(settings.playTf);
@@ -61,6 +62,7 @@ export function PlayPage() {
   const [ctx, setCtx] = useState<RoundContext | null>(null);
   const [phase, setPhase] = useState<Phase>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<{ record: RoundRecord; message: string } | null>(null);
   const [bracket, setBracket] = useState<{ direction: Direction; distance: number } | null>(null);
   const [result, setResult] = useState<PlayResult | null>(null);
   const [flash, setFlash] = useState(false);
@@ -69,34 +71,37 @@ export function PlayPage() {
   const chartTfRef = useRef(chartTf);
   const autoStarted = useRef(false);
   const actionLock = useRef(false);
-  const barsRef = useRef(bars);
-  const barsTfRef = useRef<Timeframe | null>(null);
+  const barsRef = useRef<Bar[]>([]);
+  /** `${roundId}:${tf}` of the bars on screen. */
+  const barsKeyRef = useRef<string | null>(null);
+  /** Round and result the chart should show; updated before each load so a tf change reads the latest. */
+  const viewRef = useRef<{ ctx: RoundContext | null; result: PlayResult | null }>({ ctx: null, result: null });
+  /** Bumped by every full chart load; responses from an older load are dropped. */
+  const loadSeq = useRef(0);
   const samplingSessionRef = useRef(settings.samplingSessionId);
 
-  chartTfRef.current = chartTf;
-  barsRef.current = bars;
+  const showBars = useCallback((next: Bar[]) => {
+    barsRef.current = next;
+    setBars(next);
+  }, []);
 
-  /** Active censor boundary: before answer = cutoff; after = end of revealed bar. */
-  const censorAt = (c: RoundContext, r: PlayResult | null): number | null => {
-    if (!c) return null;
-    if (r) return r.nextBarEnd;
-    return c.cutoff;
-  };
-
-  const reloadChart = useCallback(
+  const loadChart = useCallback(
     async (c: RoundContext, r: PlayResult | null, tf: Timeframe) => {
+      const seq = ++loadSeq.current;
       const cutoff = censorAt(c, r);
-      const extend = mode === 'bracket' && r != null && barsTfRef.current === tf;
+      const key = `${c.roundId}:${tf}`;
+      const extend = mode === 'bracket' && r != null && barsKeyRef.current === key;
       const data = await fetchBars({
         symbol: settings.symbol,
         tf,
         cutoff,
         limit: extend ? 8000 : 400,
       });
+      if (seq !== loadSeq.current) return;
+      let next = data;
       if (extend) {
         const prev = barsRef.current;
         const prevLast = prev[prev.length - 1]?.t;
-        let incoming = data;
         if (prevLast != null && data.length && data[0].t > prevLast) {
           const gap = await fetchBars({
             symbol: settings.symbol,
@@ -105,22 +110,40 @@ export function PlayPage() {
             after: prevLast,
             limit: 8000,
           });
-          incoming = mergeBars(data, gap);
+          if (seq !== loadSeq.current) return;
+          next = mergeBars(data, gap);
         }
-        setBars(mergeBars(prev, incoming));
-      } else {
-        setBars(data);
+        next = mergeBars(barsRef.current, next);
       }
-      barsTfRef.current = tf;
+      barsKeyRef.current = key;
+      showBars(next);
     },
-    [settings.symbol, mode],
+    [settings.symbol, mode, showBars],
   );
+
+  const changeChartTf = useCallback((tf: Timeframe) => {
+    chartTfRef.current = tf;
+    setChartTf(tf);
+  }, []);
+
+  useEffect(() => {
+    const { ctx: c, result: r } = viewRef.current;
+    if (!c) return;
+    loadChart(c, r, chartTf).catch((e) => setError(messageOf(e)));
+  }, [chartTf, loadChart]);
+
+  const showView = useCallback((c: RoundContext | null, r: PlayResult | null) => {
+    viewRef.current = { ctx: c, result: r };
+    setCtx(c);
+    setResult(r);
+  }, []);
 
   const startRound = useCallback(async () => {
     if (actionLock.current) return;
     actionLock.current = true;
     setError(null);
-    setResult(null);
+    setSaveError(null);
+    showView(viewRef.current.ctx, null);
     setBracket(null);
     setFlash(false);
     setPhase('idle');
@@ -137,21 +160,21 @@ export function PlayPage() {
         atrMultiple: settings.bracketAtrMultiple,
         samplingSessionId,
       });
-      setCtx(round);
+      showView(round, null);
       if (mode === 'bracket') {
         const multiple = round.defaultAtrMultiple ?? shownAtrMultiple(settings, null);
         setBracket({ direction: 'up', distance: defaultBracketDistance(round.atr, round.minDistance, multiple) });
       }
+      await loadChart(round, null, chartTfRef.current);
       startedAt.current = performance.now();
-      await reloadChart(round, null, chartTfRef.current);
       setPhase('deciding');
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(messageOf(e));
       setPhase('idle');
     } finally {
       actionLock.current = false;
     }
-  }, [settings, reloadChart, mode]);
+  }, [settings, loadChart, mode, showView]);
 
   useEffect(() => {
     const st = location.state as { autoStart?: boolean } | null;
@@ -161,12 +184,46 @@ export function PlayPage() {
     }
   }, [location.state, startRound]);
 
-  useEffect(() => {
-    if (!ctx) return;
-    void reloadChart(ctx, result, chartTf).catch((e) =>
-      setError(e instanceof Error ? e.message : String(e)),
-    );
-  }, [chartTf, ctx, result, reloadChart]);
+  /** Reveal failed. An expired or already-claimed round cannot be answered again, so offer the next one. */
+  const failReveal = useCallback((e: unknown) => {
+    if (e instanceof ApiError && e.message.includes('回合已失效')) {
+      setError(`${e.message}（点「下一题」继续）`);
+      setPhase('idle');
+    } else {
+      setError(messageOf(e));
+    }
+  }, []);
+
+  /** The server has claimed the round: always show the result, even if saving or charting fails. */
+  const finishReveal = useCallback(
+    async (c: RoundContext, revealed: PlayResult, record: RoundRecord, tf: Timeframe) => {
+      showView(c, revealed);
+      const [saved, charted] = await Promise.allSettled([appendRound(record), loadChart(c, revealed, tf)]);
+      if (saved.status === 'fulfilled') {
+        setStatsSnap(summarize(mode));
+      } else {
+        setSaveError({ record, message: messageOf(saved.reason) });
+      }
+      if (charted.status === 'rejected') setError(messageOf(charted.reason));
+      setFlash(true);
+      setPhase('revealed');
+    },
+    [loadChart, mode, showView],
+  );
+
+  const retrySave = useCallback(async () => {
+    if (!saveError || actionLock.current) return;
+    actionLock.current = true;
+    try {
+      await appendRound(saveError.record);
+      setSaveError(null);
+      setStatsSnap(summarize(mode));
+    } catch (e) {
+      setSaveError({ record: saveError.record, message: messageOf(e) });
+    } finally {
+      actionLock.current = false;
+    }
+  }, [saveError, mode]);
 
   const answer = useCallback(
     async (predicted: Direction) => {
@@ -174,18 +231,22 @@ export function PlayPage() {
       actionLock.current = true;
       const tfAtAnswer = chartTfRef.current;
       try {
-        const res = await revealRound(ctx.roundId, predicted);
-        const nextBarEnd = res.meta.nextBarEnd as number;
-        const revealed = {
+        let res: Awaited<ReturnType<typeof revealRound>>;
+        try {
+          res = await revealRound(ctx.roundId, predicted);
+        } catch (e) {
+          failReveal(e);
+          return;
+        }
+        const revealed: PlayResult = {
           correct: res.correct,
           predicted: res.predicted,
           actual: res.actual,
           nextBar: res.nextBar,
-          nextBarEnd,
+          nextBarEnd: res.meta.nextBarEnd,
         };
-        setResult(revealed);
         const streakBefore = getStreakBeforeNext(mode);
-        await appendRound({
+        await finishReveal(ctx, revealed, {
           id: ctx.roundId,
           playedAt: Date.now(),
           symbol: settings.symbol,
@@ -209,18 +270,12 @@ export function PlayPage() {
           volBucket: res.meta.volBucket as RoundRecord['volBucket'],
           streakBefore,
           timeToAnswerMs: Math.round(performance.now() - startedAt.current),
-        });
-        setStatsSnap(summarize(mode));
-        await reloadChart(ctx, revealed, tfAtAnswer);
-        setFlash(true);
-        setPhase('revealed');
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        }, tfAtAnswer);
       } finally {
         actionLock.current = false;
       }
     },
-    [ctx, phase, settings, reloadChart, mode],
+    [ctx, phase, settings, mode, failReveal, finishReveal],
   );
 
   const confirmBracket = useCallback(async () => {
@@ -229,7 +284,13 @@ export function PlayPage() {
     const tfAtAnswer = chartTfRef.current;
     const submitted = bracket;
     try {
-      const res = await revealBracket(ctx.roundId, submitted.direction, submitted.distance);
+      let res: BracketReveal;
+      try {
+        res = await revealBracket(ctx.roundId, submitted.direction, submitted.distance);
+      } catch (e) {
+        failReveal(e);
+        return;
+      }
       const revealed: PlayResult = {
         correct: res.correct,
         predicted: res.direction,
@@ -244,9 +305,8 @@ export function PlayPage() {
         barsToHit: res.barsToHit,
         hitTime: res.hitTime,
       };
-      setResult(revealed);
       const streakBefore = getStreakBeforeNext(mode);
-      await appendRound({
+      await finishReveal(ctx, revealed, {
         id: ctx.roundId,
         playedAt: Date.now(),
         symbol: settings.symbol,
@@ -277,17 +337,11 @@ export function PlayPage() {
         volBucket: res.meta.volBucket,
         streakBefore,
         timeToAnswerMs: Math.round(performance.now() - startedAt.current),
-      });
-      setStatsSnap(summarize(mode));
-      await reloadChart(ctx, revealed, tfAtAnswer);
-      setFlash(true);
-      setPhase('revealed');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      }, tfAtAnswer);
     } finally {
       actionLock.current = false;
     }
-  }, [ctx, bracket, phase, mode, settings, reloadChart]);
+  }, [ctx, bracket, phase, mode, settings, failReveal, finishReveal]);
 
   const nudgeBracket = useCallback(
     (ticks: number) => {
@@ -379,7 +433,7 @@ export function PlayPage() {
           e.preventDefault();
           void skipQuestion();
         }
-      } else if (phase === 'revealed') {
+      } else if (phase === 'revealed' || (phase === 'idle' && ctx)) {
         if (e.code === 'Enter' || e.code === 'Space') {
           e.preventDefault();
           void startRound();
@@ -388,28 +442,24 @@ export function PlayPage() {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [phase, mode, answer, skipQuestion, startRound, confirmBracket, nudgeBracket]);
+  }, [phase, mode, ctx, answer, skipQuestion, startRound, confirmBracket, nudgeBracket]);
 
   const onNeedMore = useCallback(
     async (oldest: number) => {
-      if (!ctx) return;
-      const cutoff = censorAt(ctx, result);
+      const { ctx: c, result: r } = viewRef.current;
+      if (!c) return;
+      const seq = loadSeq.current;
       const older = await fetchBars({
         symbol: settings.symbol,
-        tf: chartTf,
+        tf: chartTfRef.current,
         before: oldest,
-        cutoff,
+        cutoff: censorAt(c, r),
         limit: 400,
       });
-      if (!older.length) return;
-      setBars((prev) => {
-        const map = new Map<number, Bar>();
-        for (const b of older) map.set(b.t, b);
-        for (const b of prev) map.set(b.t, b);
-        return [...map.values()].sort((a, b) => a.t - b.t);
-      });
+      if (seq !== loadSeq.current || !older.length) return;
+      showBars(mergeBars(older, barsRef.current));
     },
-    [ctx, result, settings.symbol, chartTf],
+    [settings.symbol, showBars],
   );
 
   const live =
@@ -475,7 +525,7 @@ export function PlayPage() {
             {PLAY_MODE_LABELS[mode]} · {TIMEFRAME_LABELS[settings.playTf]}
             {settings.sampling === 'balanced' ? ` · ${SAMPLING_LABELS.balanced}` : ''}
           </span>
-          <TimeframeBar value={chartTf} onChange={setChartTf} />
+          <TimeframeBar value={chartTf} onChange={changeChartTf} />
           <span className="num toolbar-stats">
             胜率{' '}
             <b className={statsSnap.rate >= 0.5 ? 'up' : 'down'}>
@@ -499,6 +549,14 @@ export function PlayPage() {
         </div>
 
         {error ? <div className="error-banner">{error}</div> : null}
+        {saveError ? (
+          <div className="error-banner">
+            本题已揭晓，但记录未保存：{saveError.message}。开始下一题后将不再重试。{' '}
+            <button type="button" className="btn btn-sm" onClick={() => void retrySave()}>
+              重试保存
+            </button>
+          </div>
+        ) : null}
         <CandleChart
           bars={bars}
           watermark={watermark}
@@ -821,6 +879,15 @@ function StepButton({
       {symbol}
     </button>
   );
+}
+
+/** Active censor boundary: before answer = cutoff; after = end of revealed bar. */
+function censorAt(c: RoundContext, r: PlayResult | null): number {
+  return r ? r.nextBarEnd : c.cutoff;
+}
+
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 function mergeBars(prev: Bar[], next: Bar[]): Bar[] {
