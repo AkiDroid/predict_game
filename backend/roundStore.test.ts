@@ -1,6 +1,10 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { openDatabase } from './src/db/open.ts';
-import { ROUND_TTL_MS, SqliteRoundStore } from './roundStore.ts';
+import { migrate, openDatabase } from './src/db/open.ts';
+import { ROUND_RETENTION_MS, ROUND_TTL_MS, SqliteRoundStore } from './roundStore.ts';
 
 describe('sqlite schema', () => {
   it('creates account tables and rejects a session without a user', () => {
@@ -66,5 +70,63 @@ describe('SqliteRoundStore', () => {
     expect(store.peek('old')).toBeNull();
     expect(store.claim('old')).toBeNull();
     db.close();
+  });
+
+  it('deletes finished rounds past the retention window, at most every few minutes', () => {
+    const db = openDatabase(':memory:');
+    const store = new SqliteRoundStore(db);
+    const now = Date.now();
+    const base = {
+      userId: null,
+      symbol: 'ES' as const,
+      playTf: '5m' as const,
+      mode: 'direction' as const,
+      lastIdx: 1,
+      nextIdx: 2,
+      cutoff: 1,
+      volBucket: 'mid' as const,
+    };
+    store.insert({ ...base, id: 'old-revealed', createdAt: now - ROUND_RETENTION_MS - 1 });
+    store.insert({ ...base, id: 'old-pending', createdAt: now - ROUND_RETENTION_MS - 1 });
+    store.insert({ ...base, id: 'recent', createdAt: now - ROUND_TTL_MS - 1 });
+    store.claim('old-revealed');
+    const ids = () => db.prepare('SELECT id FROM rounds ORDER BY id').all().map((r) => String(r.id));
+
+    store.expireOlderThan(now);
+    expect(ids()).toEqual(['recent']);
+
+    store.insert({ ...base, id: 'late', createdAt: now - ROUND_RETENTION_MS - 1 });
+    store.expireOlderThan(now + 1000);
+    expect(ids()).toEqual(['late', 'recent']);
+    store.expireOlderThan(now + 11 * 60 * 1000);
+    expect(ids()).toEqual(['recent']);
+    db.close();
+  });
+});
+
+describe('user_rounds migration', () => {
+  it('keys rows by (user_id, id) and keeps existing data', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-migrations-'));
+    const src = path.join(import.meta.dirname, 'src', 'db', 'migrations');
+    for (const name of ['001_init.sql', '002_user_rounds.sql']) fs.copyFileSync(path.join(src, name), path.join(dir, name));
+    const db = new DatabaseSync(':memory:', { enableForeignKeyConstraints: true });
+    migrate(db, dir);
+    for (const id of ['u1', 'u2']) {
+      db.prepare(
+        'INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)',
+      ).run(id, `${id}@x`, 'h', id);
+    }
+    db.prepare('INSERT INTO user_rounds (id, user_id, played_at, payload) VALUES (?, ?, ?, ?)').run('r1', 'u1', 5, '{}');
+
+    migrate(db, src);
+    expect(db.prepare('SELECT user_id, id, played_at FROM user_rounds').all()).toEqual([
+      { user_id: 'u1', id: 'r1', played_at: 5 },
+    ]);
+    db.prepare('INSERT INTO user_rounds (id, user_id, played_at, payload) VALUES (?, ?, ?, ?)').run('r1', 'u2', 6, '{}');
+    expect(() =>
+      db.prepare('INSERT INTO user_rounds (id, user_id, played_at, payload) VALUES (?, ?, ?, ?)').run('r1', 'u1', 7, '{}'),
+    ).toThrow();
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

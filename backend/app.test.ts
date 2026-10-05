@@ -124,6 +124,43 @@ describe('api without market data', () => {
     expect(listed2.json().rounds).toHaveLength(1);
   });
 
+  it('scopes round ids per user and caps record size', async () => {
+    const app = await makeApp();
+    const register = async (username: string) =>
+      cookieFrom(
+        await app.inject({
+          method: 'POST',
+          url: '/api/auth/register',
+          payload: { username, password: 'password1' },
+        }),
+      );
+    const alice = await register('alice1');
+    const bob = await register('bob001');
+    const post = (cookie: string, payload: object) =>
+      app.inject({ method: 'POST', url: '/api/stats/rounds', headers: { cookie }, payload });
+
+    expect((await post(alice, sampleRound('same'))).statusCode).toBe(200);
+    expect((await post(bob, sampleRound('same'))).statusCode).toBe(200);
+    expect((await post(alice, sampleRound('same'))).statusCode).toBe(409);
+
+    const bloated = await post(alice, { ...sampleRound('big'), junk: 'x'.repeat(5000) });
+    expect(bloated.statusCode).toBe(400);
+    expect(bloated.json().error).toContain('4096');
+    const huge = await post(alice, { ...sampleRound('huge'), junk: 'x'.repeat(20000) });
+    expect(huge.statusCode).toBe(413);
+
+    const carol = await register('carol1');
+    const migrated = await app.inject({
+      method: 'POST',
+      url: '/api/stats/migrate',
+      headers: { cookie: carol },
+      payload: {
+        rounds: [sampleRound('m1'), sampleRound('m1'), sampleRound('m2'), { ...sampleRound('m3'), junk: 'x'.repeat(5000) }],
+      },
+    });
+    expect(migrated.json()).toEqual({ migrated: true, count: 2 });
+  });
+
   it('rejects short passwords and duplicate usernames', async () => {
     const app = await makeApp();
     const short = await app.inject({

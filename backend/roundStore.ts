@@ -4,6 +4,9 @@ import { TIMEFRAMES } from '../src/lib/types.ts';
 
 /** Pending rounds stay answerable for one hour, then they expire. */
 export const ROUND_TTL_MS = 60 * 60 * 1000;
+/** Revealed and expired rounds are deleted after this long. */
+export const ROUND_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const PURGE_INTERVAL_MS = 10 * 60 * 1000;
 
 /** Server-side round secret. `userId` stays null until login exists. */
 export interface StoredRound {
@@ -36,6 +39,8 @@ export class SqliteRoundStore implements RoundStore {
   private readonly markStmt: StatementSync;
   private readonly expireStmt: StatementSync;
   private readonly countStmt: StatementSync;
+  private readonly purgeStmt: StatementSync;
+  private lastPurgeAt = Number.NEGATIVE_INFINITY;
 
   constructor(db: DatabaseSync) {
     this.db = db;
@@ -55,6 +60,9 @@ export class SqliteRoundStore implements RoundStore {
     `);
     this.countStmt = db.prepare(
       'SELECT COUNT(*) AS n FROM rounds WHERE status = \'pending\'',
+    );
+    this.purgeStmt = db.prepare(
+      'DELETE FROM rounds WHERE status IN (\'revealed\', \'expired\') AND created_at < ?',
     );
   }
 
@@ -102,6 +110,10 @@ export class SqliteRoundStore implements RoundStore {
 
   expireOlderThan(nowMs: number): void {
     this.expireStmt.run(nowMs, nowMs - ROUND_TTL_MS);
+    if (nowMs - this.lastPurgeAt >= PURGE_INTERVAL_MS) {
+      this.lastPurgeAt = nowMs;
+      this.purgeStmt.run(nowMs - ROUND_RETENTION_MS);
+    }
   }
 
   countPending(): number {
