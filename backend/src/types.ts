@@ -15,5 +15,6 @@ declare module 'fastify' {
     /** Null until the auth plugin loads a session from Redis. */
     userId: string | null;
     username: string | null;
+    displayName: string | null;
   }
 }

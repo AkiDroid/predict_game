@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from './src/app.ts';
+import { MAX_ROUNDS_PER_USER } from './src/modules/stats/plugin.ts';
 
 describe('api without market data', () => {
   const apps: { close: () => Promise<void> }[] = [];
@@ -159,6 +160,125 @@ describe('api without market data', () => {
       },
     });
     expect(migrated.json()).toEqual({ migrated: true, count: 2 });
+  });
+
+  it('returns stored rounds in play order, skips corrupt rows, and reports me from the session', async () => {
+    const app = await makeApp();
+    const registered = await app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: { username: 'Order1', password: 'password1' },
+    });
+    const cookie = cookieFrom(registered);
+    const userId = registered.json().user.id as string;
+
+    const me = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie } });
+    expect(me.json()).toEqual({ user: { id: userId, username: 'Order1', displayName: 'Order1' } });
+
+    const empty = await app.inject({ method: 'GET', url: '/api/stats/rounds', headers: { cookie } });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.headers['content-type']).toContain('application/json');
+    expect(empty.json()).toEqual({ rounds: [] });
+
+    const post = (payload: object) =>
+      app.inject({ method: 'POST', url: '/api/stats/rounds', headers: { cookie }, payload });
+    expect((await post({ ...sampleRound('b'), playedAt: 200 })).statusCode).toBe(200);
+    expect((await post({ ...sampleRound('a'), playedAt: 200 })).statusCode).toBe(200);
+    expect((await post({ ...sampleRound('c'), playedAt: 100, note: 'é"\\' })).statusCode).toBe(200);
+    app.db
+      .prepare('INSERT INTO user_rounds (user_id, id, played_at, payload) VALUES (?, ?, ?, ?)')
+      .run(userId, 'broken', 150, '{"id":"broken",');
+
+    const listed = await app.inject({ method: 'GET', url: '/api/stats/rounds', headers: { cookie } });
+    const rounds = listed.json().rounds as { id: string; note?: string }[];
+    expect(rounds.map((r) => r.id)).toEqual(['c', 'a', 'b']);
+    expect(rounds[0]!.note).toBe('é"\\');
+    expect(rounds[1]).toEqual({ ...sampleRound('a'), playedAt: 200 });
+
+    const odd = ['\uffff', '😀', 'Z', 'a2', 'a10', 'é', '-'];
+    for (let k = 0; k < 40; k++) {
+      const id = `${odd[k % odd.length]}${Math.floor(k / odd.length) || ''}`;
+      expect((await post({ ...sampleRound(id), playedAt: 300 + (k % 4) })).statusCode).toBe(200);
+    }
+    const expected = app.db
+      .prepare(
+        'SELECT id FROM user_rounds WHERE user_id = ? AND json_valid(payload) ORDER BY played_at, id',
+      )
+      .all(userId)
+      .map((r) => String(r.id));
+    const relisted = await app.inject({ method: 'GET', url: '/api/stats/rounds', headers: { cookie } });
+    expect((relisted.json().rounds as { id: string }[]).map((r) => r.id)).toEqual(expected);
+  });
+
+  it('keeps 409 for duplicates and 413 at the per-user cap', async () => {
+    const app = await makeApp();
+    const registered = await app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: { username: 'capper', password: 'password1' },
+    });
+    const cookie = cookieFrom(registered);
+    const userId = registered.json().user.id as string;
+    const post = (payload: object) =>
+      app.inject({ method: 'POST', url: '/api/stats/rounds', headers: { cookie }, payload });
+
+    expect((await post(sampleRound('first'))).statusCode).toBe(200);
+    app.db
+      .prepare(
+        `WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < ?)
+         INSERT INTO user_rounds (user_id, id, played_at, payload)
+         SELECT ?, 'fill-' || i, i, '{}' FROM seq`,
+      )
+      .run(MAX_ROUNDS_PER_USER - 2, userId);
+
+    expect((await post(sampleRound('first'))).statusCode).toBe(409);
+    expect((await post(sampleRound('last'))).statusCode).toBe(200);
+    expect((await post(sampleRound('last'))).statusCode).toBe(409);
+    expect((await post(sampleRound('first'))).statusCode).toBe(409);
+    const over = await post(sampleRound('over'));
+    expect(over.statusCode).toBe(413);
+    expect(over.json().error).toContain(String(MAX_ROUNDS_PER_USER));
+
+    const migrated = await app.inject({
+      method: 'POST',
+      url: '/api/stats/migrate',
+      headers: { cookie },
+      payload: { rounds: [sampleRound('m1')] },
+    });
+    expect(migrated.json()).toEqual({ migrated: false, count: MAX_ROUNDS_PER_USER });
+
+    const cleared = await app.inject({ method: 'DELETE', url: '/api/stats/rounds', headers: { cookie } });
+    expect(cleared.statusCode).toBe(200);
+    const listed = await app.inject({ method: 'GET', url: '/api/stats/rounds', headers: { cookie } });
+    expect(listed.json()).toEqual({ rounds: [] });
+  });
+
+  it('drops the session of a deleted user and skips session lookups outside /api', async () => {
+    const app = await makeApp();
+    const registered = await app.inject({
+      method: 'POST',
+      url: '/api/auth/register',
+      payload: { username: 'ghost1', password: 'password1' },
+    });
+    const cookie = cookieFrom(registered);
+    const sid = cookie.slice('sid='.length);
+
+    const realGet = app.sessions.get.bind(app.sessions);
+    let lookups = 0;
+    app.sessions.get = (id) => {
+      lookups++;
+      return realGet(id);
+    };
+    await app.inject({ method: 'GET', url: '/assets/index.js', headers: { cookie } });
+    await app.inject({ method: 'GET', url: '/stats', headers: { cookie } });
+    expect(lookups).toBe(0);
+    expect((await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie } })).statusCode).toBe(200);
+    expect(lookups).toBe(1);
+
+    app.db.prepare('DELETE FROM users WHERE id = ?').run(registered.json().user.id);
+    const me = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie } });
+    expect(me.statusCode).toBe(401);
+    expect(await realGet(sid)).toBeNull();
   });
 
   it('rejects short passwords and duplicate usernames', async () => {

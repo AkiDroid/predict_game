@@ -16,23 +16,38 @@ export const authPlugin = fp(
   async (app, opts: { sessionTtlSec: number; cookieSecure: boolean }) => {
     app.decorateRequest('userId', null);
     app.decorateRequest('username', null);
+    app.decorateRequest('displayName', null);
+
+    const userByIdStmt = app.db.prepare('SELECT id, email, display_name FROM users WHERE id = ?');
+    const userIdByNameStmt = app.db.prepare('SELECT id FROM users WHERE email = ? COLLATE NOCASE');
+    const loginRowStmt = app.db.prepare(
+      'SELECT id, email, password_hash, display_name FROM users WHERE email = ? COLLATE NOCASE',
+    );
+    const insertUserStmt = app.db.prepare(
+      `INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
 
     app.addHook('onRequest', async (request) => {
       request.userId = null;
       request.username = null;
+      request.displayName = null;
+      // Static assets and the SPA fallback never need a session.
+      if (!request.url.startsWith('/api')) return;
       const sid = parseCookies(request.headers.cookie)[SESSION_COOKIE];
       if (!sid) return;
       const session = await app.sessions.get(sid);
       if (!session) return;
-      const row = app.db
-        .prepare('SELECT id, email, display_name FROM users WHERE id = ?')
-        .get(session.userId) as { id: string; email: string; display_name: string } | undefined;
+      const row = userByIdStmt.get(session.userId) as
+        | { id: string; email: string; display_name: string }
+        | undefined;
       if (!row) {
         await app.sessions.del(sid);
         return;
       }
       request.userId = row.id;
       request.username = row.email;
+      request.displayName = row.display_name;
     });
 
     app.post(
@@ -57,19 +72,14 @@ export const authPlugin = fp(
         const err = validateCredentials(username, password);
         if (err) return reply.status(400).send({ error: err });
 
-        const existing = app.db.prepare('SELECT id FROM users WHERE email = ? COLLATE NOCASE').get(username);
+        const existing = userIdByNameStmt.get(username);
         if (existing) return reply.status(409).send({ error: '用户名已存在' });
 
         const id = randomUUID();
         const now = Date.now();
         const passwordHash = await hashPassword(password);
         try {
-          app.db
-            .prepare(
-              `INSERT INTO users (id, email, password_hash, display_name, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-            )
-            .run(id, username, passwordHash, username, now, now);
+          insertUserStmt.run(id, username, passwordHash, username, now, now);
         } catch {
           return reply.status(409).send({ error: '用户名已存在' });
         }
@@ -97,9 +107,7 @@ export const authPlugin = fp(
       async (request, reply) => {
         const body = request.body as { username: string; password: string };
         const username = body.username.trim();
-        const row = app.db
-          .prepare('SELECT id, email, password_hash, display_name FROM users WHERE email = ? COLLATE NOCASE')
-          .get(username) as
+        const row = loginRowStmt.get(username) as
           | { id: string; email: string; password_hash: string; display_name: string }
           | undefined;
         if (!row || !(await verifyPassword(body.password, row.password_hash))) {
@@ -124,11 +132,13 @@ export const authPlugin = fp(
 
     app.get('/api/auth/me', async (request, reply) => {
       if (!request.userId) return reply.status(401).send({ error: '未登录' });
-      const row = app.db
-        .prepare('SELECT id, email, display_name FROM users WHERE id = ?')
-        .get(request.userId) as { id: string; email: string; display_name: string } | undefined;
-      if (!row) return reply.status(401).send({ error: '未登录' });
-      return { user: { id: row.id, username: row.email, displayName: row.display_name } };
+      return {
+        user: {
+          id: request.userId,
+          username: request.username,
+          displayName: request.displayName,
+        },
+      };
     });
   },
   { name: 'auth', dependencies: ['db', 'redis'] },

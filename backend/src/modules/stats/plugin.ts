@@ -7,6 +7,7 @@ import { requireAuth } from '../auth/plugin.ts';
 export const MAX_ROUND_BYTES = 4096;
 export const MAX_ROUNDS_PER_USER = 100_000;
 const MAX_ROUND_ID = 80;
+const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
 
 export const statsPlugin = fp(
   async (app) => {
@@ -18,28 +19,36 @@ export const statsPlugin = fp(
 async function statsRoutes(app: FastifyInstance): Promise<void> {
   const countStmt = app.db.prepare('SELECT COUNT(*) AS n FROM user_rounds WHERE user_id = ?');
   const countFor = (userId: string) => Number((countStmt.get(userId) as { n: number | bigint }).n);
+  const hasAnyStmt = app.db.prepare('SELECT 1 FROM user_rounds WHERE user_id = ? LIMIT 1');
+  const existsStmt = app.db.prepare('SELECT 1 FROM user_rounds WHERE user_id = ? AND id = ?');
+  // Payloads are written with JSON.stringify; json_valid still drops rows corrupted out of band
+  // so the concatenated body is always valid JSON. Ordering by played_at alone is served by
+  // user_rounds_user_played_idx without a sort; ties are ordered by id in listBody.
+  const listStmt = app.db.prepare(
+    `SELECT played_at, id, payload
+       FROM user_rounds
+      WHERE user_id = ? AND json_valid(payload)
+      ORDER BY played_at ASC`,
+  );
+  listStmt.setReturnArrays(true);
+  const insertUnderCapStmt = app.db.prepare(
+    `INSERT INTO user_rounds (id, user_id, played_at, payload)
+     SELECT ?, ?, ?, ?
+      WHERE (SELECT COUNT(*) FROM user_rounds WHERE user_id = ?) < ?`,
+  );
+  const insertIgnoreStmt = app.db.prepare(
+    `INSERT OR IGNORE INTO user_rounds (id, user_id, played_at, payload)
+     VALUES (?, ?, ?, ?)`,
+  );
+  const deleteStmt = app.db.prepare('DELETE FROM user_rounds WHERE user_id = ?');
   const capError = `对局记录已达上限（${MAX_ROUNDS_PER_USER} 条），请先清空统计`;
 
   app.get(
     '/api/stats/rounds',
     { preHandler: requireAuth },
-    async (request) => {
-      const rows = app.db
-        .prepare(
-          `SELECT payload FROM user_rounds
-           WHERE user_id = ?
-           ORDER BY played_at ASC, id ASC`,
-        )
-        .all(request.userId!) as { payload: string }[];
-      const rounds: RoundRecord[] = [];
-      for (const row of rows) {
-        try {
-          rounds.push(JSON.parse(row.payload) as RoundRecord);
-        } catch {
-          // skip corrupt row
-        }
-      }
-      return { rounds };
+    async (request, reply) => {
+      const rows = listStmt.all(request.userId!) as unknown as ListRow[];
+      return reply.type('application/json; charset=utf-8').send(listBody(rows));
     },
   );
 
@@ -61,20 +70,27 @@ async function statsRoutes(app: FastifyInstance): Promise<void> {
       const checked = checkRound(round);
       if ('error' in checked) return reply.status(400).send({ error: checked.error });
 
-      const existing = app.db
-        .prepare('SELECT 1 FROM user_rounds WHERE user_id = ? AND id = ?')
-        .get(request.userId!, round.id);
-      if (existing) return reply.status(409).send({ error: '对局记录已存在' });
-      if (countFor(request.userId!) >= MAX_ROUNDS_PER_USER) {
+      const userId = request.userId!;
+      let changes: number;
+      try {
+        const result = insertUnderCapStmt.run(
+          round.id,
+          userId,
+          round.playedAt,
+          checked.payload,
+          userId,
+          MAX_ROUNDS_PER_USER,
+        );
+        changes = Number(result.changes);
+      } catch (err) {
+        if (isPrimaryKeyConflict(err)) return reply.status(409).send({ error: '对局记录已存在' });
+        throw err;
+      }
+      if (changes === 0) {
+        // At the cap the insert is skipped before the PK check; duplicates still report 409.
+        if (existsStmt.get(userId, round.id)) return reply.status(409).send({ error: '对局记录已存在' });
         return reply.status(413).send({ error: capError });
       }
-
-      app.db
-        .prepare(
-          `INSERT INTO user_rounds (id, user_id, played_at, payload)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(round.id, request.userId!, round.playedAt, checked.payload);
       return { ok: true };
     },
   );
@@ -100,15 +116,10 @@ async function statsRoutes(app: FastifyInstance): Promise<void> {
         return reply.status(400).send({ error: 'rounds 无效' });
       }
 
-      const existing = countFor(request.userId!);
-      if (existing > 0) {
-        return { migrated: false, count: existing };
+      if (hasAnyStmt.get(request.userId!)) {
+        return { migrated: false, count: countFor(request.userId!) };
       }
 
-      const insert = app.db.prepare(
-        `INSERT OR IGNORE INTO user_rounds (id, user_id, played_at, payload)
-         VALUES (?, ?, ?, ?)`,
-      );
       let inserted = 0;
       app.db.exec('BEGIN');
       try {
@@ -116,7 +127,7 @@ async function statsRoutes(app: FastifyInstance): Promise<void> {
           if (inserted >= MAX_ROUNDS_PER_USER) break;
           const checked = checkRound(round);
           if ('error' in checked) continue;
-          const result = insert.run(round.id, request.userId!, round.playedAt, checked.payload);
+          const result = insertIgnoreStmt.run(round.id, request.userId!, round.playedAt, checked.payload);
           inserted += Number(result.changes);
         }
         app.db.exec('COMMIT');
@@ -132,9 +143,43 @@ async function statsRoutes(app: FastifyInstance): Promise<void> {
     '/api/stats/rounds',
     { preHandler: requireAuth },
     async (request) => {
-      app.db.prepare('DELETE FROM user_rounds WHERE user_id = ?').run(request.userId!);
+      deleteStmt.run(request.userId!);
       return { ok: true };
     },
+  );
+}
+
+type ListRow = [playedAt: number, id: string, payload: string];
+
+/** `{"rounds":[...]}` in `ORDER BY played_at, id` order, built from rows sorted by played_at only. */
+export function listBody(rows: ListRow[]): string {
+  const payloads = new Array<string>(rows.length);
+  let i = 0;
+  while (i < rows.length) {
+    let j = i + 1;
+    while (j < rows.length && rows[j]![0] === rows[i]![0]) j++;
+    if (j - i > 1) {
+      const tie = rows.slice(i, j).sort((a, b) => compareSqliteText(a[1], b[1]));
+      for (let k = 0; k < tie.length; k++) payloads[i + k] = tie[k]![2];
+    } else {
+      payloads[i] = rows[i]![2];
+    }
+    i = j;
+  }
+  return `{"rounds":[${payloads.join(',')}]}`;
+}
+
+/** SQLite's default BINARY collation compares UTF-8 bytes, which differs from JS for astral chars. */
+function compareSqliteText(a: string, b: string): number {
+  return Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+}
+
+function isPrimaryKeyConflict(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'errcode' in err &&
+    (err as { errcode: unknown }).errcode === SQLITE_CONSTRAINT_PRIMARYKEY
   );
 }
 

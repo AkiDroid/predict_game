@@ -13,6 +13,8 @@ export function openDatabase(filename: string): DatabaseSync {
   });
   if (filename !== ':memory:') {
     db.exec('PRAGMA journal_mode = WAL');
+    // Durable across application crashes; only an OS crash can lose the last commits.
+    db.exec('PRAGMA synchronous = NORMAL');
   }
   migrate(db);
   return db;
