@@ -27,7 +27,11 @@ function partsOf(ms: number, formatter = chicagoFormatter): Record<string, strin
   return out;
 }
 
-/** Convert Chicago wall-clock local time → UTC epoch ms. */
+/**
+ * Convert Chicago wall-clock local time → UTC epoch ms. A repeated fall-back time
+ * resolves to the standard-time (second) occurrence; a nonexistent spring-forward
+ * time keeps whatever the Intl iteration settles on.
+ */
 export function chicagoLocalToUtcMs(
   year: number,
   month: number,
@@ -36,7 +40,23 @@ export function chicagoLocalToUtcMs(
   minute: number,
   second = 0,
 ): number {
+  const fast = chicagoWallToUtcMs(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (fast === fast) return fast;
   return zonedLocalToUtcMs(chicagoFormatter, year, month, day, hour, minute, second);
+}
+
+/**
+ * Same answer as the Intl iteration in `zonedLocalToUtcMs`, which starts at the
+ * standard-time guess and keeps it when consistent, else moves to daylight time.
+ * NaN when neither guess is consistent (spring-forward gap) or outside the arithmetic range.
+ */
+function chicagoWallToUtcMs(wallMs: number): number {
+  const std = wallMs - STD_OFFSET_SEC * 1000;
+  const dst = wallMs - DST_OFFSET_SEC * 1000;
+  if (!(dst >= FAST_MIN_SEC * 1000 && std < FAST_MAX_SEC * 1000)) return Number.NaN;
+  if (chicagoOffsetSeconds(std / 1000) === STD_OFFSET_SEC) return std;
+  if (chicagoOffsetSeconds(dst / 1000) === DST_OFFSET_SEC) return dst;
+  return Number.NaN;
 }
 
 function zonedLocalToUtcMs(
@@ -70,10 +90,21 @@ function zonedLocalToUtcMs(
  * missing and cash opens at 09:30). Returns UTC unix seconds.
  */
 export function parseDataTimestamp(dateStr: string, timeStr: string): number {
-  const [mm, dd, yyyy] = dateStr.split('/').map(Number);
+  if (dateStr !== parsedDateStr) {
+    const [mm, dd, yyyy] = dateStr.split('/').map(Number);
+    parsedDateStr = dateStr;
+    parsedMonth = mm;
+    parsedDay = dd;
+    parsedYear = yyyy;
+  }
   const [hh, mi] = timeStr.split(':').map(Number);
-  return easternLocalToUnix(yyyy, mm, dd, hh, mi);
+  return easternLocalToUnix(parsedYear, parsedMonth, parsedDay, hh, mi);
 }
+
+let parsedDateStr: string | null = null;
+let parsedMonth = 0;
+let parsedDay = 0;
+let parsedYear = 0;
 
 /** Daily file rows carry only the trade date; returns that session's open (17:00 CT the day before). */
 export function parseDailyDate(dateStr: string): number {
@@ -99,9 +130,18 @@ export function easternLocalToUnix(
   }
   const wall = Date.UTC(year, month - 1, day, hour, minute, second) / 1000;
   const asDst = wall + 4 * 3600;
-  const { start, end } = usDstBounds(year, -5);
-  return asDst >= start && asDst < end ? asDst : asDst + 3600;
+  if (year !== easternBoundsYear) {
+    const bounds = usDstBounds(year, -5);
+    easternBoundsYear = year;
+    easternDstStart = bounds.start;
+    easternDstEnd = bounds.end;
+  }
+  return asDst >= easternDstStart && asDst < easternDstEnd ? asDst : asDst + 3600;
 }
+
+let easternBoundsYear = Number.NaN;
+let easternDstStart = 0;
+let easternDstEnd = 0;
 
 export interface ChicagoParts {
   year: number;
@@ -115,6 +155,12 @@ export interface ChicagoParts {
 
 const STD_OFFSET_SEC = -6 * 3600;
 const DST_OFFSET_SEC = -5 * 3600;
+const DAY_SEC = 86400;
+const SESSION_ROLL_SEC = 17 * 3600;
+/** [min, max) UTC seconds where Chicago civil time is pure arithmetic; outside it, Intl answers. */
+const FAST_MIN_SEC = Date.UTC(1987, 0, 1) / 1000;
+const FAST_MAX_SEC = Date.UTC(2200, 0, 1) / 1000;
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 let offsetYearStart = Number.NEGATIVE_INFINITY;
 let offsetYearEnd = Number.NEGATIVE_INFINITY;
@@ -186,7 +232,38 @@ function lastSunday(year: number, monthIndex: number): number {
   return lastDate - lastDow;
 }
 
-export function getChicagoParts(unixSec: number): ChicagoParts {
+/**
+ * Whole Chicago wall-clock seconds since 1970-01-01T00:00 local, or NaN outside the
+ * arithmetic range. Rounds like `new Date(unixSec * 1000)` does before Intl formats it.
+ */
+function chicagoLocalSeconds(unixSec: number): number {
+  if (!(unixSec >= FAST_MIN_SEC && unixSec < FAST_MAX_SEC)) return Number.NaN;
+  const whole = Math.floor(Math.floor(unixSec * 1000) / 1000);
+  return whole + chicagoOffsetSeconds(whole);
+}
+
+let civilYear = 0;
+let civilMonth = 0;
+let civilDay = 0;
+
+/** Proleptic Gregorian date of a day count since 1970-01-01, into civilYear/Month/Day. */
+function setCivilDate(days: number): void {
+  const z = days + 719468;
+  const era = Math.floor(z / 146097);
+  const doe = z - era * 146097;
+  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+  const mp = Math.floor((5 * doy + 2) / 153);
+  civilDay = doy - Math.floor((153 * mp + 2) / 5) + 1;
+  civilMonth = mp < 10 ? mp + 3 : mp - 9;
+  civilYear = yoe + era * 400 + (civilMonth <= 2 ? 1 : 0);
+}
+
+function weekdayOfDay(days: number): number {
+  return (((days + 4) % 7) + 7) % 7;
+}
+
+function partsFromIntl(unixSec: number): ChicagoParts {
   const p = partsOf(unixSec * 1000);
   return {
     year: Number(p.year),
@@ -197,6 +274,50 @@ export function getChicagoParts(unixSec: number): ChicagoParts {
     second: Number(p.second ?? '0'),
     weekday: p.weekday,
   };
+}
+
+export function getChicagoParts(unixSec: number): ChicagoParts {
+  const local = chicagoLocalSeconds(unixSec);
+  if (local !== local) return partsFromIntl(unixSec);
+  const days = Math.floor(local / DAY_SEC);
+  const sod = local - days * DAY_SEC;
+  setCivilDate(days);
+  return {
+    year: civilYear,
+    month: civilMonth,
+    day: civilDay,
+    hour: Math.floor(sod / 3600),
+    minute: Math.floor(sod / 60) % 60,
+    second: sod % 60,
+    weekday: WEEKDAYS[weekdayOfDay(days)],
+  };
+}
+
+/** Seconds since Chicago local midnight (whole seconds, like `getChicagoParts`). */
+export function chicagoSecondOfDay(unixSec: number): number {
+  const local = chicagoLocalSeconds(unixSec);
+  if (local !== local) {
+    const p = partsFromIntl(unixSec);
+    return p.hour * 3600 + p.minute * 60 + p.second;
+  }
+  return local - Math.floor(local / DAY_SEC) * DAY_SEC;
+}
+
+/** Local day count (since 1970-01-01) of the trade date `local` belongs to: 17:00 CT rolls to the next day. */
+function tradeDayOfLocal(local: number): number {
+  const days = Math.floor(local / DAY_SEC);
+  return local - days * DAY_SEC >= SESSION_ROLL_SEC ? days + 1 : days;
+}
+
+let keyDay = Number.NaN;
+let keyText = '';
+
+function dayKey(days: number): string {
+  if (days === keyDay) return keyText;
+  setCivilDate(days);
+  keyDay = days;
+  keyText = `${civilYear}-${String(civilMonth).padStart(2, '0')}-${String(civilDay).padStart(2, '0')}`;
+  return keyText;
 }
 
 export function formatChicago(unixSec: number): string {
@@ -211,7 +332,9 @@ export function formatChicago(unixSec: number): string {
  * Bars with local hour >= 17 belong to the next trade date.
  */
 export function tradeDateKey(unixSec: number): string {
-  const p = getChicagoParts(unixSec);
+  const local = chicagoLocalSeconds(unixSec);
+  if (local === local) return dayKey(tradeDayOfLocal(local));
+  const p = partsFromIntl(unixSec);
   let y = p.year;
   let m = p.month;
   let d = p.day;
@@ -237,10 +360,22 @@ export function sessionEndUnix(tradeDate: string): number {
   return Math.floor(chicagoLocalToUtcMs(y, m, d, 17, 0) / 1000);
 }
 
+/** `sessionEndUnix(tradeDateKey(unixSec))`: end of the trade session the instant belongs to. */
+export function tradeSessionEndUnix(unixSec: number): number {
+  const local = chicagoLocalSeconds(unixSec);
+  if (local === local) {
+    const endMs = chicagoWallToUtcMs((tradeDayOfLocal(local) * DAY_SEC + SESSION_ROLL_SEC) * 1000);
+    if (endMs === endMs) return Math.floor(endMs / 1000);
+  }
+  return sessionEndUnix(tradeDateKey(unixSec));
+}
+
 export const TIMEZONE_LABEL = 'America/Chicago (CME)';
 
 export function weekdayIndex(unixSec: number): number {
   // 0=Sun ... 6=Sat in Chicago
+  const local = chicagoLocalSeconds(unixSec);
+  if (local === local) return weekdayOfDay(Math.floor(local / DAY_SEC));
   const map: Record<string, number> = {
     Sun: 0,
     Mon: 1,
@@ -250,11 +385,13 @@ export function weekdayIndex(unixSec: number): number {
     Fri: 5,
     Sat: 6,
   };
-  return map[getChicagoParts(unixSec).weekday] ?? 0;
+  return map[partsFromIntl(unixSec).weekday] ?? 0;
 }
 
 /** 0=Sun ... 6=Sat of the CME trade date the instant belongs to. */
 export function tradeDateWeekday(unixSec: number): number {
+  const local = chicagoLocalSeconds(unixSec);
+  if (local === local) return weekdayOfDay(tradeDayOfLocal(local));
   const [y, m, d] = tradeDateKey(unixSec).split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
 }

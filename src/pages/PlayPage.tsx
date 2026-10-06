@@ -14,6 +14,7 @@ import {
   type Bracket,
 } from '../lib/bracket';
 import { maxVisibleOpen } from '../lib/censor';
+import { mergeBars } from '../lib/mergeBars';
 import { SESSION_LABELS } from '../lib/session';
 import { loadSettings, saveSettings } from '../lib/settings';
 import { computeOverall, currentStreakValue } from '../lib/stats';
@@ -462,10 +463,13 @@ export function PlayPage() {
     [settings.symbol, showBars],
   );
 
-  const live =
-    mode === 'bracket' && ctx && bracket ? makeBracket(ctx.lastBar.c, bracket.direction, bracket.distance) : null;
+  const live = useMemo(
+    () =>
+      mode === 'bracket' && ctx && bracket ? makeBracket(ctx.lastBar.c, bracket.direction, bracket.distance) : null,
+    [mode, ctx, bracket],
+  );
 
-  const chartBracket: ChartBracket | null = (() => {
+  const chartBracket = useMemo((): ChartBracket | null => {
     if (mode !== 'bracket' || !ctx || phase === 'idle') return null;
     if (
       phase === 'revealed' &&
@@ -494,7 +498,7 @@ export function PlayPage() {
       interactive: true,
       hit: null,
     };
-  })();
+  }, [mode, ctx, phase, result, live]);
 
   const onBracketChange = useCallback((next: Bracket) => {
     setBracket({ direction: next.direction, distance: next.distance });
@@ -505,14 +509,17 @@ export function PlayPage() {
     [mode, ctx, chartTf, bars],
   );
 
-  const watermark =
-    ctx && phase === 'deciding'
-      ? mode === 'bracket'
-        ? `止盈止损 · 拖动水平线 · 截止 ${formatZoned(ctx.cutoff, timeZone)}`
-        : `预测模式 · 数据截止 ${formatZoned(ctx.cutoff, timeZone)}`
-      : ctx && phase === 'revealed'
-        ? `已揭晓 · 目标 ${formatZoned(ctx.cutoff, timeZone)}`
-        : undefined;
+  const watermark = useMemo(
+    () =>
+      ctx && phase === 'deciding'
+        ? mode === 'bracket'
+          ? `止盈止损 · 拖动水平线 · 截止 ${formatZoned(ctx.cutoff, timeZone)}`
+          : `预测模式 · 数据截止 ${formatZoned(ctx.cutoff, timeZone)}`
+        : ctx && phase === 'revealed'
+          ? `已揭晓 · 目标 ${formatZoned(ctx.cutoff, timeZone)}`
+          : undefined,
+    [ctx, phase, mode, timeZone],
+  );
 
   return (
     <div className="page-wide play-page">
@@ -888,15 +895,6 @@ function censorAt(c: RoundContext, r: PlayResult | null): number {
 
 function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
-}
-
-function mergeBars(prev: Bar[], next: Bar[]): Bar[] {
-  if (!prev.length) return next;
-  if (!next.length) return prev;
-  const map = new Map<number, Bar>();
-  for (const bar of prev) map.set(bar.t, bar);
-  for (const bar of next) map.set(bar.t, bar);
-  return [...map.values()].sort((a, b) => a.t - b.t);
 }
 
 function shownAtrMultiple(

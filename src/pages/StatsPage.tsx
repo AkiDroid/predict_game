@@ -1,28 +1,61 @@
 import { useMemo, useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { clearRounds, hydrateRounds, loadRounds } from '../lib/storage';
-import { computeStats, isSkipped, type SliceStat } from '../lib/stats';
+import {
+  clearRounds,
+  hydrateRounds,
+  loadRounds,
+  roundsSyncAge,
+  roundsSynced,
+  subscribeRounds,
+  whenRoundsReady,
+} from '../lib/storage';
+import { computeStats, isSkipped, type SliceStat, type StatsReport } from '../lib/stats';
 import { TIMEFRAME_LABELS, type PlayMode, type RoundRecord, type SymbolId, type Timeframe } from '../lib/types';
 import { formatChicago } from '../lib/time';
+import { decimatedIndices } from '../lib/decimate';
+
+/** A cache synced this recently (e.g. by sign-in) is shown without refetching. */
+const FRESH_MS = 60_000;
+const RECENT_ROWS = 100;
+
+/** The cache array is replaced (never mutated) on change, so identity is a safe memo key. */
+let lastReport: { rounds: RoundRecord[]; report: StatsReport } | null = null;
+
+function statsOf(rounds: RoundRecord[]): StatsReport {
+  if (lastReport?.rounds !== rounds) lastReport = { rounds, report: computeStats(rounds) };
+  return lastReport.report;
+}
+
+function sameIds(a: RoundRecord[], b: RoundRecord[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i].id !== b[i].id) return false;
+  return true;
+}
 
 export function StatsPage() {
   const [rounds, setRounds] = useState<RoundRecord[]>(() => loadRounds());
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !roundsSynced());
   const [loadError, setLoadError] = useState<string | null>(null);
   const [filterSym, setFilterSym] = useState<SymbolId | 'all'>('all');
   const [filterTf, setFilterTf] = useState<Timeframe | 'all'>('all');
   const [filterMode, setFilterMode] = useState<PlayMode | 'all'>('all');
-  const report = useMemo(() => computeStats(rounds), [rounds]);
+  const report = useMemo(() => statsOf(rounds), [rounds]);
 
   useEffect(() => {
     let cancelled = false;
+    const show = (next: RoundRecord[]) => {
+      if (cancelled) return;
+      // Payloads are immutable per id, so an identical id list means identical stats.
+      setRounds((prev) => (sameIds(prev, next) ? prev : next));
+      setLoadError(null);
+    };
+    const unsubscribe = subscribeRounds(() => show(loadRounds()));
     (async () => {
       try {
-        const next = await hydrateRounds();
-        if (!cancelled) {
-          setRounds(next);
-          setLoadError(null);
-        }
+        // Share a sign-in sync that is still in flight instead of fetching everything twice.
+        await whenRoundsReady();
+        if (roundsSyncAge() < FRESH_MS) show(loadRounds());
+        else show(await hydrateRounds());
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -31,15 +64,20 @@ export function StatsPage() {
     })();
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, []);
 
   const filtered = useMemo(() => {
-    return [...rounds]
-      .reverse()
-      .filter((r) => (filterSym === 'all' ? true : r.symbol === filterSym))
-      .filter((r) => (filterTf === 'all' ? true : r.playTf === filterTf))
-      .filter((r) => (filterMode === 'all' ? true : (r.mode ?? 'direction') === filterMode));
+    const out: RoundRecord[] = [];
+    for (let i = rounds.length - 1; i >= 0 && out.length < RECENT_ROWS; i--) {
+      const r = rounds[i];
+      if (filterSym !== 'all' && r.symbol !== filterSym) continue;
+      if (filterTf !== 'all' && r.playTf !== filterTf) continue;
+      if (filterMode !== 'all' && (r.mode ?? 'direction') !== filterMode) continue;
+      out.push(r);
+    }
+    return out;
   }, [rounds, filterSym, filterTf, filterMode]);
 
   if (loading) {
@@ -200,7 +238,7 @@ export function StatsPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.slice(0, 100).map((r) => (
+              {filtered.map((r) => (
                 <tr key={r.id}>
                   <td>{new Date(r.playedAt).toLocaleString('zh-CN')}</td>
                   <td>{r.symbol}</td>
@@ -336,7 +374,7 @@ function EquityChart({ equity }: { equity: { i: number; equity: number; rolling:
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      paintEquity(ctx, equity, w, h);
+      paintEquity(ctx, equity, w, h, dpr);
     };
 
     draw();
@@ -348,18 +386,41 @@ function EquityChart({ equity }: { equity: { i: number; equity: number; rolling:
   return <canvas ref={ref} className="equity-canvas" />;
 }
 
+function traceDecimated(
+  ctx: CanvasRenderingContext2D,
+  n: number,
+  columns: number,
+  valueAt: (i: number) => number,
+  xOf: (i: number) => number,
+  yOf: (v: number) => number,
+) {
+  const indices = decimatedIndices(n, columns, valueAt);
+  for (let k = 0; k < indices.length; k++) {
+    const i = indices[k];
+    const x = xOf(i);
+    const y = yOf(valueAt(i));
+    if (k === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+}
+
 function paintEquity(
   ctx: CanvasRenderingContext2D,
   equity: { i: number; equity: number; rolling: number }[],
   w: number,
   h: number,
+  dpr: number,
 ) {
 
     const pad = { l: 36, r: 12, t: 16, b: 24 };
-    const eqs = equity.map((e) => e.equity);
-    const minE = Math.min(...eqs, 0);
-    const maxE = Math.max(...eqs, 0);
+    let minE = 0;
+    let maxE = 0;
+    for (const e of equity) {
+      if (e.equity < minE) minE = e.equity;
+      if (e.equity > maxE) maxE = e.equity;
+    }
     const span = Math.max(1, maxE - minE);
+    const columns = Math.max(1, Math.round((w - pad.l - pad.r) * dpr));
 
     const xOf = (i: number) => pad.l + ((w - pad.l - pad.r) * i) / Math.max(1, equity.length - 1);
     const yEq = (v: number) => pad.t + ((maxE - v) / span) * (h - pad.t - pad.b);
@@ -376,12 +437,7 @@ function paintEquity(
     ctx.strokeStyle = '#3d9cfd';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    equity.forEach((e, i) => {
-      const x = xOf(i);
-      const y = yEq(e.equity);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
+    traceDecimated(ctx, equity.length, columns, (i) => equity[i].equity, xOf, yEq);
     ctx.stroke();
 
     // rolling wr
@@ -389,17 +445,12 @@ function paintEquity(
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 3]);
     ctx.beginPath();
-    equity.forEach((e, i) => {
-      const x = xOf(i);
-      const y = yRoll(e.rolling);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
+    traceDecimated(ctx, equity.length, columns, (i) => equity[i].rolling, xOf, yRoll);
     ctx.stroke();
     ctx.setLineDash([]);
 
     ctx.font = '11px IBM Plex Mono, monospace';
-    const equityLabel = `权益 ${eqs[eqs.length - 1]}`;
+    const equityLabel = `权益 ${equity[equity.length - 1].equity}`;
     const rollLabel = '滚动胜率';
     ctx.fillStyle = '#5c6b7d';
     ctx.fillText(equityLabel, pad.l, 12);

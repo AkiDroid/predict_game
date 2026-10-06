@@ -1,5 +1,5 @@
 import type { Bar, Timeframe } from './types';
-import { getChicagoParts, sessionEndUnix, sessionOpenUnix, tradeDateKey } from './time';
+import { chicagoSecondOfDay, sessionOpenUnix, tradeDateKey, tradeSessionEndUnix } from './time';
 
 export const TF_SECONDS: Record<Exclude<Timeframe, '1d'>, number> = {
   '1m': 60,
@@ -12,7 +12,7 @@ export const TF_SECONDS: Record<Exclude<Timeframe, '1d'>, number> = {
 
 export function barEndUnix(barOpen: number, tf: Timeframe): number {
   if (tf === '1d') {
-    return sessionEndUnix(tradeDateKey(barOpen));
+    return tradeSessionEndUnix(barOpen);
   }
   return barOpen + TF_SECONDS[tf];
 }
@@ -24,9 +24,8 @@ export function barEndUnix(barOpen: number, tf: Timeframe): number {
  */
 export function bucketStartUnix(unixSec: number, tf: Exclude<Timeframe, '1d'>): number {
   const sec = TF_SECONDS[tf];
-  const p = getChicagoParts(unixSec);
-  const dayOpen = unixSec - p.hour * 3600 - p.minute * 60 - p.second;
-  const sod = p.hour * 3600 + p.minute * 60 + p.second;
+  const sod = chicagoSecondOfDay(unixSec);
+  const dayOpen = unixSec - sod;
   const anchor = tf === '4h' ? 17 * 3600 : 0;
   const sinceAnchor = (((sod - anchor) % 86400) + 86400) % 86400;
   return dayOpen + sod - (sinceAnchor % sec);

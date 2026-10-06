@@ -13,6 +13,18 @@ export default defineConfig({
       '@': path.join(root, 'src'),
     },
   },
+  build: {
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            { name: 'charts', test: /node_modules[\\/](lightweight-charts|fancy-canvas)[\\/]/ },
+            { name: 'react-vendor', test: /node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler)[\\/]/ },
+          ],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     strictPort: true,

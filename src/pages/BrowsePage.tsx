@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { CandleChart } from '../components/CandleChart';
 import { TimeframeBar } from '../components/TimeframeBar';
-import { fetchBars, fetchHealth } from '../lib/api';
+import { fetchBars } from '../lib/api';
+import { mergeBars } from '../lib/mergeBars';
 import {
   SYMBOL_META,
   type Bar,
@@ -23,8 +24,6 @@ export function BrowsePage() {
     setLoading(true);
     setError(null);
     try {
-      const h = await fetchHealth();
-      if (!h.ok) throw new Error(h.error || '数据未就绪');
       const data = await fetchBars({ symbol: sym, tf: timeframe, limit: 800 });
       if (seq === loadSeq.current) setBars(data);
     } catch (e) {
@@ -51,12 +50,7 @@ export function BrowsePage() {
           limit: 500,
         });
         if (seq !== loadSeq.current || !older.length) return;
-        setBars((prev) => {
-          const map = new Map<number, Bar>();
-          for (const b of older) map.set(b.t, b);
-          for (const b of prev) map.set(b.t, b);
-          return [...map.values()].sort((a, b) => a.t - b.t);
-        });
+        setBars((prev) => mergeBars(older, prev));
       } catch {
         /* ignore pan-load errors */
       }

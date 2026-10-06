@@ -132,6 +132,24 @@ export function listTimeZones(): string[] {
   return zoneListCache;
 }
 
+export interface TimeZoneOption {
+  tz: string;
+  label: string;
+}
+
+const OPTION_LABEL_TTL_MS = 60 * 60 * 1000;
+let zoneOptionsCache: { at: number; options: TimeZoneOption[] } | null = null;
+
+/** `UTC+8 · Asia/Shanghai` labels for every zone; offsets are refreshed at most hourly. */
+export function listTimeZoneOptions(): TimeZoneOption[] {
+  const now = Date.now();
+  if (zoneOptionsCache && now - zoneOptionsCache.at < OPTION_LABEL_TTL_MS) return zoneOptionsCache.options;
+  const at = now / 1000;
+  const options = listTimeZones().map((tz) => ({ tz, label: `${formatOffset(zoneOffsetMinutes(tz, at))} · ${tz}` }));
+  zoneOptionsCache = { at: now, options };
+  return options;
+}
+
 export function loadTimeZone(): string {
   try {
     const raw = localStorage.getItem(TIMEZONE_STORAGE_KEY);
@@ -149,24 +167,41 @@ export function saveTimeZone(timeZone: string): void {
   } catch {
     /* storage unavailable */
   }
+  cachedZone = null;
   window.dispatchEvent(new Event(CHANGE_EVENT));
 }
 
+/** Last `loadTimeZone()` result; trusted only while a subscriber keeps it invalidated on change. */
+let cachedZone: string | null = null;
+let subscribers = 0;
+
+function snapshot(): string {
+  if (cachedZone == null || subscribers === 0) cachedZone = loadTimeZone();
+  return cachedZone;
+}
+
 function subscribe(cb: () => void): () => void {
-  const onStorage = (e: StorageEvent) => {
-    if (e.key === TIMEZONE_STORAGE_KEY) cb();
+  const onChange = () => {
+    cachedZone = null;
+    cb();
   };
-  window.addEventListener(CHANGE_EVENT, cb);
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === TIMEZONE_STORAGE_KEY || e.key === null) onChange();
+  };
+  subscribers++;
+  cachedZone = null;
+  window.addEventListener(CHANGE_EVENT, onChange);
   window.addEventListener('storage', onStorage);
   return () => {
-    window.removeEventListener(CHANGE_EVENT, cb);
+    subscribers--;
+    window.removeEventListener(CHANGE_EVENT, onChange);
     window.removeEventListener('storage', onStorage);
   };
 }
 
 /** Selected display zone, shared across components and tabs. */
 export function useTimeZone(): [string, (timeZone: string) => void] {
-  const timeZone = useSyncExternalStore(subscribe, loadTimeZone, loadTimeZone);
+  const timeZone = useSyncExternalStore(subscribe, snapshot, snapshot);
   const set = useCallback((next: string) => saveTimeZone(next), []);
   return [timeZone, set];
 }

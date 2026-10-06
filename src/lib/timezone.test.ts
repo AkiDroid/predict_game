@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatOffset, formatZoned, zoneOffsetMinutes } from './timezone';
+import { formatOffset, formatZoned, listTimeZoneOptions, listTimeZones, zoneOffsetMinutes } from './timezone';
 
 const T = Date.UTC(2026, 8, 30, 12, 44) / 1000;
 
@@ -21,5 +21,17 @@ describe('timezone formatting', () => {
     expect(formatOffset(zoneOffsetMinutes('America/Chicago', Date.UTC(2026, 0, 5) / 1000))).toBe('UTC-6');
     expect(formatOffset(zoneOffsetMinutes('Asia/Kolkata', T))).toBe('UTC+5:30');
     expect(formatOffset(zoneOffsetMinutes('UTC', T))).toBe('UTC');
+  });
+});
+
+describe('timezone options', () => {
+  it('labels every zone with its current offset and reuses the list', () => {
+    const options = listTimeZoneOptions();
+    expect(options.map((o) => o.tz)).toEqual(listTimeZones());
+    const utc = options.find((o) => o.tz === 'UTC');
+    expect(utc?.label).toBe('UTC · UTC');
+    const sh = options.find((o) => o.tz === 'Asia/Shanghai');
+    if (sh) expect(sh.label).toBe('UTC+8 · Asia/Shanghai');
+    expect(listTimeZoneOptions()).toBe(options);
   });
 });

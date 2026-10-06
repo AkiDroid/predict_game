@@ -12,16 +12,17 @@ import {
   type CandlestickData,
   type HistogramData,
   type Logical,
+  type MouseEventParams,
   type Time,
   type Coordinate,
   createChart,
 } from 'lightweight-charts';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { bracketFromPointer, formatAtrMultiple, PRICE_TICK, type Bracket } from '../lib/bracket';
 import {
   formatOffset,
   formatZoned,
-  listTimeZones,
+  listTimeZoneOptions,
   useTimeZone,
   zoneOffsetMinutes,
   zoneParts,
@@ -55,6 +56,98 @@ function toVol(b: Bar): HistogramData<Time> {
     color: b.c >= b.o ? 'rgba(38,166,154,0.45)' : 'rgba(239,83,80,0.45)',
   };
 }
+
+/** Bars are immutable once fetched, so converted points can be reused across prepends and reveals. */
+const seriesPointCache = new WeakMap<Bar, { candle: CandlestickData<Time>; vol: HistogramData<Time> }>();
+
+function toSeriesData(bars: Bar[]): { candles: CandlestickData<Time>[]; vols: HistogramData<Time>[] } {
+  const candles = new Array<CandlestickData<Time>>(bars.length);
+  const vols = new Array<HistogramData<Time>>(bars.length);
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i];
+    let point = seriesPointCache.get(b);
+    if (!point) {
+      point = { candle: toCandle(b), vol: toVol(b) };
+      seriesPointCache.set(b, point);
+    }
+    candles[i] = point.candle;
+    vols[i] = point.vol;
+  }
+  return { candles, vols };
+}
+
+function lastBarLegend(b: Bar): string {
+  return `O ${fmt(b.o)}  H ${fmt(b.h)}  L ${fmt(b.l)}  C ${fmt(b.c)}  V ${fmtVol(b.v)}`;
+}
+
+interface HoverStore {
+  get: () => number | null;
+  set: (t: number | null) => void;
+  subscribe: (cb: () => void) => () => void;
+}
+
+function createHoverStore(): HoverStore {
+  let value: number | null = null;
+  const listeners = new Set<() => void>();
+  return {
+    get: () => value,
+    set: (t) => {
+      if (t === value) return;
+      value = t;
+      for (const cb of listeners) cb();
+    },
+    subscribe: (cb) => {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+  };
+}
+
+const TzReadout = memo(function TzReadout({
+  hover,
+  lastTime,
+  timeZone,
+}: {
+  hover: HoverStore;
+  lastTime: number | null;
+  timeZone: string;
+}) {
+  const hoverTime = useSyncExternalStore(hover.subscribe, hover.get, hover.get);
+  const readoutTime = hoverTime ?? lastTime;
+  const readoutOffset = formatOffset(zoneOffsetMinutes(timeZone, readoutTime ?? undefined));
+  return (
+    <>
+      <span className="chart-tzbar-time num">{readoutTime != null ? formatZoned(readoutTime, timeZone) : '—'}</span>
+      <span className="chart-tzbar-offset num">{readoutOffset}</span>
+    </>
+  );
+});
+
+const TimeZoneSelect = memo(function TimeZoneSelect({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (timeZone: string) => void;
+}) {
+  const [options] = useState(listTimeZoneOptions);
+  return (
+    <select
+      aria-label="图表时区"
+      value={value}
+      onChange={(e) => {
+        onChange(e.target.value);
+        e.currentTarget.blur();
+      }}
+    >
+      {options.map((o) => (
+        <option key={o.tz} value={o.tz}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  );
+});
 
 export interface ChartBracket {
   entry: number;
@@ -96,7 +189,7 @@ interface Lines {
   sl: IPriceLine;
 }
 
-export function CandleChart({
+export const CandleChart = memo(function CandleChart({
   bars,
   flashLast,
   watermark,
@@ -133,10 +226,18 @@ export function CandleChart({
   const applyingRef = useRef(false);
   const holdPriceRef = useRef(false);
   const captureAnchorRef = useRef<() => void>(() => {});
-  const [legend, setLegend] = useState('');
+  const legendRef = useRef<HTMLDivElement>(null);
+  const legendHtmlRef = useRef('');
+  const flushCrosshairRef = useRef<() => void>(() => {});
+  const [hover] = useState(createHoverStore);
   const [overlay, setOverlay] = useState<Overlay | null>(null);
-  const [hoverTime, setHoverTime] = useState<number | null>(null);
   const [timeZone, setTimeZone] = useTimeZone();
+
+  function setLegend(html: string) {
+    if (legendHtmlRef.current === html) return;
+    legendHtmlRef.current = html;
+    if (legendRef.current) legendRef.current.innerHTML = html;
+  }
 
   barsRef.current = bars;
   onNeedMoreRef.current = onNeedMoreHistory;
@@ -374,15 +475,18 @@ export function CandleChart({
     window.addEventListener('pointerup', disarmUserView);
     window.addEventListener('pointercancel', disarmUserView);
 
-    chart.subscribeCrosshairMove((param) => {
-      setHoverTime(param.time == null ? null : timeToUnix(param.time));
+    let crosshairParam: MouseEventParams<Time> | null = null;
+    let crosshairRaf = 0;
+    const applyCrosshair = () => {
+      const param = crosshairParam;
+      crosshairParam = null;
+      if (crosshairRaf) cancelAnimationFrame(crosshairRaf);
+      crosshairRaf = 0;
+      if (!param) return;
+      hover.set(param.time == null ? null : timeToUnix(param.time));
       if (!param.time || !param.seriesData.size) {
         const last = barsRef.current[barsRef.current.length - 1];
-        if (last) {
-          setLegend(
-            `O ${fmt(last.o)}  H ${fmt(last.h)}  L ${fmt(last.l)}  C ${fmt(last.c)}  V ${fmtVol(last.v)}`,
-          );
-        }
+        if (last) setLegend(lastBarLegend(last));
         return;
       }
       const c = param.seriesData.get(candles) as CandlestickData<Time> | undefined;
@@ -393,6 +497,11 @@ export function CandleChart({
           `<span class="${cls}">O ${fmt(c.open)}  H ${fmt(c.high)}  L ${fmt(c.low)}  C ${fmt(c.close)}</span>  V ${fmtVol(v?.value ?? 0)}`,
         );
       }
+    };
+    flushCrosshairRef.current = applyCrosshair;
+    chart.subscribeCrosshairMove((param) => {
+      crosshairParam = param;
+      if (!crosshairRaf) crosshairRaf = requestAnimationFrame(applyCrosshair);
     });
 
     const onRange = () => {
@@ -423,6 +532,8 @@ export function CandleChart({
     });
 
     return () => {
+      if (crosshairRaf) cancelAnimationFrame(crosshairRaf);
+      flushCrosshairRef.current = () => {};
       ro.disconnect();
       el.removeEventListener('wheel', refresh);
       el.removeEventListener('pointerup', refresh);
@@ -437,7 +548,7 @@ export function CandleChart({
       volRef.current = null;
       linesRef.current = null;
     };
-  }, []);
+  }, [hover]);
 
   useEffect(() => {
     chartRef.current?.applyOptions({
@@ -457,11 +568,6 @@ export function CandleChart({
     });
   }, [timeZone]);
 
-  const zoneOptions = useMemo(
-    () => listTimeZones().map((tz) => ({ tz, label: `${formatOffset(zoneOffsetMinutes(tz))} · ${tz}` })),
-    [],
-  );
-
   useEffect(() => {
     const chart = chartRef.current;
     const candles = candleRef.current;
@@ -478,13 +584,12 @@ export function CandleChart({
     const fraction = anchorXFractionRef.current;
     const anchorIndex = pinnedTime == null ? -1 : barIndexByTime(bars, pinnedTime);
 
-    candles.setData(bars.map(toCandle));
-    volume.setData(bars.map(toVol));
+    const data = toSeriesData(bars);
+    candles.setData(data.candles);
+    volume.setData(data.vols);
+    flushCrosshairRef.current();
     if (bars.length) {
-      const last = bars[bars.length - 1];
-      setLegend(
-        `O ${fmt(last.o)}  H ${fmt(last.h)}  L ${fmt(last.l)}  C ${fmt(last.c)}  V ${fmtVol(last.v)}`,
-      );
+      setLegend(lastBarLegend(bars[bars.length - 1]));
 
       const placeAnchor = () => {
         if (chartRef.current !== chart || candleRef.current !== candles) return false;
@@ -616,8 +721,7 @@ export function CandleChart({
   const tpTitle = `${bHit === 'tp' ? '止盈 触及' : '止盈'} ${overlay ? overlay.takeProfit.toFixed(2) : ''} · ${mult}`;
   const slTitle = `${bHit === 'sl' ? '止损 触及' : '止损'} ${overlay ? overlay.stopLoss.toFixed(2) : ''} · ${mult}`;
 
-  const readoutTime = hoverTime ?? bars[bars.length - 1]?.t ?? null;
-  const readoutOffset = formatOffset(zoneOffsetMinutes(timeZone, readoutTime ?? undefined));
+  const lastTime = bars[bars.length - 1]?.t ?? null;
 
   return (
     <div
@@ -660,10 +764,7 @@ export function CandleChart({
           <span className="badge badge-play">{watermark}</span>
         </div>
       ) : null}
-      <div
-        className={`ohlc-legend ${watermark ? 'with-badge' : ''}`}
-        dangerouslySetInnerHTML={{ __html: legend }}
-      />
+      <div className={`ohlc-legend ${watermark ? 'with-badge' : ''}`} ref={legendRef} />
       <div className="chart-canvas" ref={containerRef} />
       {overlay && overlay.entryY != null && overlay.tpY != null ? (
         <div
@@ -694,29 +795,15 @@ export function CandleChart({
         <div className="bracket-handle down" style={handleStyle(overlay.slY, overlay.width)} />
       ) : null}
       <div className="chart-tzbar">
-        <span className="chart-tzbar-time num">{readoutTime != null ? formatZoned(readoutTime, timeZone) : '—'}</span>
-        <span className="chart-tzbar-offset num">{readoutOffset}</span>
+        <TzReadout hover={hover} lastTime={lastTime} timeZone={timeZone} />
         <label className="chart-tzbar-zone">
           <span className="muted">时区</span>
-          <select
-            aria-label="图表时区"
-            value={timeZone}
-            onChange={(e) => {
-              setTimeZone(e.target.value);
-              e.currentTarget.blur();
-            }}
-          >
-            {zoneOptions.map((o) => (
-              <option key={o.tz} value={o.tz}>
-                {o.label}
-              </option>
-            ))}
-          </select>
+          <TimeZoneSelect value={timeZone} onChange={setTimeZone} />
         </label>
       </div>
     </div>
   );
-}
+});
 
 function inTzBar(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('.chart-tzbar') != null;

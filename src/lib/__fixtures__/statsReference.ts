@@ -1,3 +1,4 @@
+// Verbatim copy of the pre-optimization src/lib/stats.ts, used only by stats.test.ts as a reference.
 import type {
   Direction,
   PlayMode,
@@ -7,7 +8,7 @@ import type {
   SymbolId,
   Timeframe,
   VolBucket,
-} from './types';
+} from '../types';
 
 export interface SliceStat {
   key: string;
@@ -92,16 +93,10 @@ function sliceOf(
   label: string,
   rounds: RoundRecord[],
 ): SliceStat {
-  let skips = 0;
-  let n = 0;
-  let wins = 0;
-  for (const r of rounds) {
-    if (isSkipped(r)) skips++;
-    if (isScored(r)) {
-      n++;
-      if (r.correct) wins++;
-    }
-  }
+  const skips = rounds.filter((r) => isSkipped(r)).length;
+  const answered = rounds.filter((r) => isScored(r));
+  const n = answered.length;
+  const wins = answered.filter((r) => r.correct).length;
   const losses = n - wins;
   const winRate = n ? wins / n : 0;
   const insufficient = n < MIN_SAMPLE;
@@ -140,24 +135,11 @@ function groupBy<T extends string | number>(
     .sort((a, b) => b.n + b.skips - (a.n + a.skips));
 }
 
-/** Win rate over the last `windows[k]` scored rounds (all of them if fewer), from one backward scan. */
-function recentWinRates(rounds: RoundRecord[], windows: number[]): (number | null)[] {
-  const largest = Math.max(...windows);
-  const winsAt = new Map<number, number>();
-  let seen = 0;
-  let wins = 0;
-  for (let i = rounds.length - 1; i >= 0 && seen < largest; i--) {
-    const r = rounds[i];
-    if (!isScored(r)) continue;
-    seen++;
-    if (r.correct) wins++;
-    if (windows.includes(seen)) winsAt.set(seen, wins);
-  }
-  return windows.map((n) => {
-    if (seen === 0) return null;
-    const len = Math.min(n, seen);
-    return (winsAt.get(len) ?? wins) / len;
-  });
+function recentWinRate(rounds: RoundRecord[], n: number): number | null {
+  const answered = rounds.filter((r) => isScored(r));
+  if (answered.length === 0) return null;
+  const slice = answered.slice(-n);
+  return slice.filter((r) => r.correct).length / slice.length;
 }
 
 export function computeOverall(rounds: RoundRecord[]): OverallStats {
@@ -193,7 +175,6 @@ export function computeOverall(rounds: RoundRecord[]): OverallStats {
   }
 
   const answered = wins + losses;
-  const [recent20, recent50, recent100] = recentWinRates(rounds, [20, 50, 100]);
   return {
     total: rounds.length,
     answered,
@@ -207,9 +188,9 @@ export function computeOverall(rounds: RoundRecord[]): OverallStats {
     currentStreakType: answered ? curType : 'none',
     maxWinStreak: maxWin,
     maxLossStreak: maxLoss,
-    recent20,
-    recent50,
-    recent100,
+    recent20: recentWinRate(rounds, 20),
+    recent50: recentWinRate(rounds, 50),
+    recent100: recentWinRate(rounds, 100),
   };
 }
 
@@ -241,21 +222,15 @@ const RANGE_LABEL: Record<RangeBucket, string> = {
 };
 
 export function buildEquity(rounds: RoundRecord[], window = 20): StatsReport['equity'] {
-  return equityOfScored(rounds.filter((r) => isScored(r)), window);
-}
-
-function equityOfScored(answered: RoundRecord[], window: number): StatsReport['equity'] {
+  const answered = rounds.filter((r) => isScored(r));
   let eq = 0;
-  let windowWins = 0;
-  const out: StatsReport['equity'] = new Array(answered.length);
+  const out: StatsReport['equity'] = [];
   for (let i = 0; i < answered.length; i++) {
-    const win = answered[i].correct;
-    eq += win ? 1 : -1;
-    if (win) windowWins++;
-    const from = i - window + 1;
-    if (from > 0 && answered[from - 1].correct) windowWins--;
-    const len = from > 0 ? window : i + 1;
-    out[i] = { i: i + 1, equity: eq, rolling: windowWins / len };
+    eq += answered[i].correct ? 1 : -1;
+    const from = Math.max(0, i - window + 1);
+    const slice = answered.slice(from, i + 1);
+    const rolling = slice.filter((r) => r.correct).length / slice.length;
+    out.push({ i: i + 1, equity: eq, rolling });
   }
   return out;
 }
@@ -325,7 +300,7 @@ export function computeStats(rounds: RoundRecord[]): StatsReport {
     byActual,
     byVol,
     byRange,
-    equity: equityOfScored(scored, 20),
+    equity: buildEquity(rounds),
     reading,
   };
 }

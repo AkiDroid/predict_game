@@ -18,29 +18,48 @@ import {
   type Timeframe,
 } from '../lib/types';
 
+type HealthView = { ok: boolean; error?: string; info?: string };
+
+/** Market data only loads at server start, so a healthy answer holds for the page session. */
+let healthyView: HealthView | null = null;
+let healthRequest: Promise<HealthView> | null = null;
+
+function loadHealthView(): Promise<HealthView> {
+  if (healthyView) return Promise.resolve(healthyView);
+  healthRequest ??= fetchHealth()
+    .then((h): HealthView => {
+      if (!h.ok) return { ok: false, error: h.error };
+      const es = h.loaded.find((x) => x.symbol === 'ES' && x.tf === '1m');
+      healthyView = {
+        ok: true,
+        info: es
+          ? `已加载 ${h.loaded.length} 组序列 · ES 1m ${es.count.toLocaleString()} 根`
+          : `已加载 ${h.loaded.length} 组序列`,
+      };
+      return healthyView;
+    })
+    .catch((e): HealthView => ({ ok: false, error: String(e) }))
+    .finally(() => {
+      healthRequest = null;
+    });
+  return healthRequest;
+}
+
 export function HomePage() {
   const nav = useNavigate();
   const [settings, setSettings] = useState<GameSettings>(() => loadSettings());
   const [sessions, setSessions] = useState<SessionBucket[]>([]);
-  const [health, setHealth] = useState<{ ok: boolean; error?: string; info?: string }>({
-    ok: false,
-  });
+  const [health, setHealth] = useState<HealthView>(() => healthyView ?? { ok: false });
 
   useEffect(() => {
-    fetchHealth()
-      .then((h) => {
-        if (!h.ok) setHealth({ ok: false, error: h.error });
-        else {
-          const es = h.loaded.find((x) => x.symbol === 'ES' && x.tf === '1m');
-          setHealth({
-            ok: true,
-            info: es
-              ? `已加载 ${h.loaded.length} 组序列 · ES 1m ${es.count.toLocaleString()} 根`
-              : `已加载 ${h.loaded.length} 组序列`,
-          });
-        }
-      })
-      .catch((e) => setHealth({ ok: false, error: String(e) }));
+    if (healthyView) return;
+    let cancelled = false;
+    void loadHealthView().then((view) => {
+      if (!cancelled) setHealth(view);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   function update(partial: Partial<GameSettings>) {

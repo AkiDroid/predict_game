@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 
@@ -51,7 +52,9 @@ export function Layout() {
             </button>
           </div>
         ) : null}
-        <Outlet />
+        <Suspense fallback={<div className="muted">加载中…</div>}>
+          <Outlet />
+        </Suspense>
       </main>
     </div>
   );
