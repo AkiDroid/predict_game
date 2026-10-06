@@ -1,10 +1,10 @@
 /**
  * Stream-parse 1-minute TXT → resample all TFs → write compact PBAR binaries.
- * Usage: npx tsx scripts/preprocess.ts
+ * Usage: npx tsx scripts/preprocess.ts [--out <dir>] [--symbol ES|NQ]
+ * The output directory defaults to data/processed (also settable via PREPROCESS_OUT_DIR).
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { encodeBars } from '../backend/binary.ts';
 import { resampleOHLCV } from '../src/lib/resample.ts';
@@ -15,18 +15,42 @@ import { TIMEFRAMES } from '../src/lib/types.ts';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const DATA = path.join(ROOT, 'data');
-const OUT = path.join(DATA, 'processed');
+const OUT = path.resolve(argValue('--out') ?? process.env.PREPROCESS_OUT_DIR ?? path.join(DATA, 'processed'));
+const ONLY_SYMBOL = argValue('--symbol');
+
+function argValue(flag: string): string | undefined {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
+/** Calls `onLine` per line, split like readline with `crlfDelay: Infinity`: on \r\n, \n, or a lone \r. */
+async function forEachLine(filePath: string, onLine: (line: string) => void): Promise<void> {
+  let rest = '';
+  for await (const chunk of fs.createReadStream(filePath, { encoding: 'utf8', highWaterMark: 1 << 20 })) {
+    const text = rest + (chunk as string);
+    let start = 0;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text.charCodeAt(i);
+      if (ch !== 10 && ch !== 13) continue;
+      // A trailing \r may pair with a \n in the next chunk.
+      if (ch === 13 && i === text.length - 1) break;
+      onLine(text.slice(start, i));
+      if (ch === 13 && text.charCodeAt(i + 1) === 10) i++;
+      start = i + 1;
+    }
+    rest = text.slice(start);
+  }
+  if (rest) onLine(rest.endsWith('\r') ? rest.slice(0, -1) : rest);
+}
 
 async function parse1m(filePath: string): Promise<Bar[]> {
   const bars: Bar[] = [];
-  const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   let lineNo = 0;
   let dropped = 0;
-  for await (const line of rl) {
+  await forEachLine(filePath, (line) => {
     lineNo++;
     const trimmed = line.trim();
-    if (!trimmed) continue;
+    if (!trimmed) return;
     const parts = trimmed.split(',');
     if (parts.length < 7) {
       throw new Error(`${filePath}:${lineNo} bad columns: ${trimmed.slice(0, 80)}`);
@@ -37,7 +61,7 @@ async function parse1m(filePath: string): Promise<Bar[]> {
     if (prev && t <= prev.t) {
       // Repeated wall-clock minutes (DST fall-back) would break the sorted series.
       dropped++;
-      continue;
+      return;
     }
     bars.push({
       t,
@@ -50,7 +74,7 @@ async function parse1m(filePath: string): Promise<Bar[]> {
     if (lineNo % 500_000 === 0) {
       console.log(`  ... ${lineNo.toLocaleString()} lines`);
     }
-  }
+  });
   if (dropped) console.warn(`  dropped ${dropped} out-of-order rows`);
   return bars;
 }
@@ -101,6 +125,7 @@ async function processSymbol(symbol: SymbolId): Promise<void> {
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
   for (const symbol of ['ES', 'NQ'] as SymbolId[]) {
+    if (ONLY_SYMBOL && symbol !== ONLY_SYMBOL) continue;
     await processSymbol(symbol);
   }
   console.log('\nDone. Output:', OUT);

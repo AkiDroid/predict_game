@@ -4,7 +4,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { migrate, openDatabase } from './src/db/open.ts';
-import { ROUND_RETENTION_MS, ROUND_TTL_MS, SqliteRoundStore } from './roundStore.ts';
+import { EXPIRE_INTERVAL_MS, ROUND_RETENTION_MS, ROUND_TTL_MS, SqliteRoundStore } from './roundStore.ts';
 
 describe('sqlite schema', () => {
   it('creates account tables and rejects a session without a user', () => {
@@ -70,6 +70,50 @@ describe('SqliteRoundStore', () => {
     expect(store.peek('old')).toBeNull();
     expect(store.claim('old')).toBeNull();
     db.close();
+  });
+
+  it('throttles expiry but never counts or answers a stale round', () => {
+    const db = openDatabase(':memory:');
+    const store = new SqliteRoundStore(db);
+    const now = Date.now();
+    const base = {
+      userId: null,
+      symbol: 'ES' as const,
+      playTf: '5m' as const,
+      mode: 'direction' as const,
+      lastIdx: 1,
+      nextIdx: 2,
+      cutoff: 1,
+      volBucket: 'mid' as const,
+    };
+    const status = (id: string) => db.prepare('SELECT status FROM rounds WHERE id = ?').get(id)?.status;
+    store.expireOlderThan(now);
+    store.insert({ ...base, id: 'fresh', createdAt: now });
+    store.insert({ ...base, id: 'stale', createdAt: now - ROUND_TTL_MS - 1 });
+    store.expireOlderThan(now + 1000);
+    expect(status('stale')).toBe('pending');
+    expect(store.countPending()).toBe(1);
+    expect(store.peek('stale')).toBeNull();
+    expect(status('stale')).toBe('expired');
+
+    store.insert({ ...base, id: 'stale2', createdAt: now - ROUND_TTL_MS - 1 });
+    expect(store.claim('stale2')).toBeNull();
+    store.insert({ ...base, id: 'stale3', createdAt: now - ROUND_TTL_MS - 1 });
+    store.expireOlderThan(now + EXPIRE_INTERVAL_MS);
+    expect(status('stale3')).toBe('expired');
+    expect(store.countPending()).toBe(1);
+    expect(store.claim('fresh')?.id).toBe('fresh');
+    expect(store.countPending()).toBe(0);
+    db.close();
+  });
+
+  it('opens file databases in WAL mode with synchronous=NORMAL', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-db-'));
+    const db = openDatabase(path.join(dir, 'app.sqlite'));
+    expect(db.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('wal');
+    expect(db.prepare('PRAGMA synchronous').get()?.synchronous).toBe(1);
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('deletes finished rounds past the retention window, at most every few minutes', () => {

@@ -7,6 +7,11 @@ export const ROUND_TTL_MS = 60 * 60 * 1000;
 /** Revealed and expired rounds are deleted after this long. */
 export const ROUND_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const PURGE_INTERVAL_MS = 10 * 60 * 1000;
+/**
+ * Marking stale rounds expired is bookkeeping only: peek/claim check the TTL
+ * themselves and countPending ignores stale rows, so it runs at most this often.
+ */
+export const EXPIRE_INTERVAL_MS = 60 * 1000;
 
 /** Server-side round secret. `userId` stays null until login exists. */
 export interface StoredRound {
@@ -28,6 +33,7 @@ export interface RoundStore {
   peek(id: string): StoredRound | null;
   /** Mark a still-pending round revealed. Returns null if it was already taken or expired. */
   claim(id: string): StoredRound | null;
+  /** Housekeeping; may do nothing when called again soon after. */
   expireOlderThan(nowMs: number): void;
   countPending(): number;
 }
@@ -41,6 +47,7 @@ export class SqliteRoundStore implements RoundStore {
   private readonly countStmt: StatementSync;
   private readonly purgeStmt: StatementSync;
   private lastPurgeAt = Number.NEGATIVE_INFINITY;
+  private lastExpireAt = Number.NEGATIVE_INFINITY;
 
   constructor(db: DatabaseSync) {
     this.db = db;
@@ -59,7 +66,7 @@ export class SqliteRoundStore implements RoundStore {
       WHERE status = 'pending' AND created_at < ?
     `);
     this.countStmt = db.prepare(
-      'SELECT COUNT(*) AS n FROM rounds WHERE status = \'pending\'',
+      'SELECT COUNT(*) AS n FROM rounds WHERE status = \'pending\' AND created_at >= ?',
     );
     this.purgeStmt = db.prepare(
       'DELETE FROM rounds WHERE status IN (\'revealed\', \'expired\') AND created_at < ?',
@@ -109,15 +116,19 @@ export class SqliteRoundStore implements RoundStore {
   }
 
   expireOlderThan(nowMs: number): void {
-    this.expireStmt.run(nowMs, nowMs - ROUND_TTL_MS);
-    if (nowMs - this.lastPurgeAt >= PURGE_INTERVAL_MS) {
-      this.lastPurgeAt = nowMs;
-      this.purgeStmt.run(nowMs - ROUND_RETENTION_MS);
-    }
+    if (nowMs >= this.lastExpireAt && nowMs - this.lastExpireAt < EXPIRE_INTERVAL_MS) return;
+    this.lastExpireAt = nowMs;
+    const purge = nowMs - this.lastPurgeAt >= PURGE_INTERVAL_MS;
+    if (purge) this.lastPurgeAt = nowMs;
+    this.transaction(() => {
+      this.expireStmt.run(nowMs, nowMs - ROUND_TTL_MS);
+      if (purge) this.purgeStmt.run(nowMs - ROUND_RETENTION_MS);
+    });
   }
 
+  /** Pending rounds still inside the TTL, whether or not expiry has marked the stale ones yet. */
   countPending(): number {
-    const row = this.countStmt.get();
+    const row = this.countStmt.get(Date.now() - ROUND_TTL_MS);
     return row ? asInt(row.n, 'n') : 0;
   }
 

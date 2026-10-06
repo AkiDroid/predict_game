@@ -42,16 +42,83 @@ export interface RoundDrawOptions {
   atrMultiple?: number;
 }
 
-type BracketLabels = Map<number, 'up' | 'down' | 'none'>;
+type BracketSide = 'up' | 'down' | 'none';
+
+/** Two bits per last-bar index: 0 = not computed yet, else BRACKET_SIDES[code]. */
+interface BracketLabels {
+  bits: Uint8Array;
+  known: number;
+}
+
+const BRACKET_SIDES: readonly (BracketSide | null)[] = [null, 'up', 'down', 'none'];
+const BRACKET_SIDE_CODE: Record<BracketSide, number> = { up: 1, down: 2, none: 3 };
+
+/**
+ * Sorted indices `first <= i < end` minus a sorted `skipped` list. Most bars are
+ * eligible, so this stores the few exclusions instead of every index.
+ */
+class IndexPool {
+  readonly length: number;
+  private readonly first: number;
+  private readonly end: number;
+  private readonly skipped: Int32Array;
+
+  constructor(first: number, end: number, skipped: Int32Array) {
+    this.first = first;
+    this.end = end;
+    this.skipped = skipped;
+    this.length = Math.max(0, end - first - skipped.length);
+  }
+
+  get bytes(): number {
+    return this.skipped.byteLength;
+  }
+
+  /** The k-th eligible index, 0 <= k < length. */
+  at(k: number): number {
+    const skipped = this.skipped;
+    let lo = 0;
+    let hi = skipped.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (skipped[mid]! - this.first - mid <= k) lo = mid + 1;
+      else hi = mid;
+    }
+    return this.first + k + lo;
+  }
+
+  /** Number of eligible indices below `value`: the position of the first one >= `value`. */
+  rank(value: number): number {
+    if (value <= this.first) return 0;
+    const v = Math.min(value, this.end);
+    return v - this.first - lowerBound(this.skipped, v);
+  }
+
+  /** First eligible index at positions [lo, hi) that passes `test`, or -1. Visits them in order. */
+  find(lo: number, hi: number, test: (index: number) => boolean): number {
+    if (lo >= hi) return -1;
+    const skipped = this.skipped;
+    let i = this.at(lo);
+    let j = lowerBound(skipped, i);
+    for (let p = lo; p < hi; p++) {
+      if (test(i)) return i;
+      i++;
+      while (j < skipped.length && skipped[j] === i) {
+        i++;
+        j++;
+      }
+    }
+    return -1;
+  }
+}
 
 const NO_SAMPLES = '没有符合条件的样本（检查日期/时段过滤，或数据是否已预处理）';
 const SESSION_ORDER: SessionBucket[] = ['asia', 'europe', 'america_rth', 'america_eth'];
 const SESSION_CODE = Object.fromEntries(SESSION_ORDER.map((s, i) => [s, i])) as Record<SessionBucket, number>;
 const ALL_SESSIONS_MASK = (1 << SESSION_ORDER.length) - 1;
 const SESSION_REJECTION_TRIES = 64;
-/** Balanced bracket labels: at most this many symbol/tf/multiple maps, each holding this many entries. */
+/** Balanced bracket labels: at most this many symbol/tf/multiple label arrays (2 bits per bar each). */
 export const BRACKET_LABEL_MAPS = 16;
-export const BRACKET_LABELS_PER_MAP = 50_000;
 
 export class GameEngine {
   private series = new Map<string, BarSeries>();
@@ -59,9 +126,11 @@ export class GameEngine {
   private readonly random: () => number;
   private volThresholds = new Map<string, { lowMax: number; midMax: number }>();
   private rangeThresholds = new Map<string, { lowMax: number; midMax: number }>();
-  private basePools = new Map<string, Int32Array>();
+  private basePools = new Map<string, IndexPool>();
   private sessionCodeCache = new Map<string, Uint8Array>();
   private bracketLabels = new Map<string, BracketLabels>();
+  /** Period end of each bar of a '1d' series, which would otherwise need a calendar lookup. */
+  private dailyEnds = new WeakMap<BarSeries, Float64Array>();
 
   constructor(rounds: RoundStore, random: () => number = Math.random) {
     this.rounds = rounds;
@@ -69,7 +138,40 @@ export class GameEngine {
   }
 
   setSeries(symbol: SymbolId, tf: Timeframe, series: BarSeries): void {
-    this.series.set(`${symbol}:${tf}`, series);
+    const key = `${symbol}:${tf}`;
+    this.series.set(key, series);
+    this.volThresholds.delete(key);
+    this.rangeThresholds.delete(key);
+    this.sessionCodeCache.delete(key);
+    for (const mode of ['direction', 'bracket'] as const) this.basePools.delete(`${key}:${mode}`);
+    // Labels read the play series and the symbol's 1m path.
+    for (const labelKey of [...this.bracketLabels.keys()]) {
+      if (labelKey.startsWith(`${symbol}:`)) this.bracketLabels.delete(labelKey);
+    }
+    if (tf === '1d') {
+      const ends = new Float64Array(series.length);
+      for (let i = 0; i < series.length; i++) ends[i] = barEndUnix(series.t[i], tf);
+      this.dailyEnds.set(series, ends);
+    }
+  }
+
+  /** Builds every series' sampling caches now, so the first round on each does not pay for them. */
+  prewarm(): void {
+    for (const key of this.series.keys()) {
+      const [symbol, tf] = key.split(':') as [SymbolId, Timeframe];
+      this.ensureThresholds(symbol, tf);
+      this.basePool(symbol, tf, 'direction');
+      this.basePool(symbol, tf, 'bracket');
+      if (sessionFilterApplies(tf)) this.sessionCodes(symbol, tf);
+    }
+  }
+
+  private barEnd(s: BarSeries, tf: Timeframe, i: number): number {
+    if (tf === '1d') {
+      const ends = this.dailyEnds.get(s);
+      if (ends) return ends[i]!;
+    }
+    return barEndUnix(s.t[i], tf);
   }
 
   getSeries(symbol: SymbolId, tf: Timeframe): BarSeries {
@@ -132,14 +234,14 @@ export class GameEngine {
   }
 
   /** Sorted last-bar indices that can start a round, before any user filter. One per symbol/tf/mode. */
-  private basePool(symbol: SymbolId, playTf: Timeframe, mode: PlayMode): Int32Array {
+  private basePool(symbol: SymbolId, playTf: Timeframe, mode: PlayMode): IndexPool {
     const key = `${symbol}:${playTf}:${mode}`;
     const cached = this.basePools.get(key);
     if (cached) return cached;
 
     const s = this.getSeries(symbol, playTf);
-    const out = new Int32Array(Math.max(0, s.length));
-    let n = 0;
+    const end = Math.max(MIN_CONTEXT, s.length - 1);
+    const skipped: number[] = [];
     if (mode === 'bracket') {
       const trRing = new Float64Array(ATR_PERIOD);
       let sum = 0;
@@ -149,16 +251,14 @@ export class GameEngine {
         const slot = (i - 1) % ATR_PERIOD;
         if (i > ATR_PERIOD) sum -= trRing[slot];
         trRing[slot] = tr;
-        if (i < MIN_CONTEXT || !(sum > 0)) continue;
-        out[n++] = i;
+        if (i >= MIN_CONTEXT && !(sum > 0)) skipped.push(i);
       }
     } else {
       for (let i = MIN_CONTEXT; i < s.length - 1; i++) {
-        if (s.c[i + 1] === s.o[i + 1]) continue;
-        out[n++] = i;
+        if (s.c[i + 1] === s.o[i + 1]) skipped.push(i);
       }
     }
-    const pool = out.slice(0, n);
+    const pool = new IndexPool(MIN_CONTEXT, end, Int32Array.from(skipped));
     this.basePools.set(key, pool);
     return pool;
   }
@@ -192,10 +292,10 @@ export class GameEngine {
     let lo = 0;
     let hi = pool.length;
     if (filters.dateFrom != null) {
-      lo = lowerBound(pool, s.indexAtOrAfter(filters.dateFrom) - 1);
+      lo = pool.rank(s.indexAtOrAfter(filters.dateFrom) - 1);
     }
     if (filters.dateTo != null) {
-      hi = lowerBound(pool, s.indexAtOrAfter(Math.floor(filters.dateTo) + 1) - 1);
+      hi = pool.rank(s.indexAtOrAfter(Math.floor(filters.dateTo) + 1) - 1);
     }
     if (lo >= hi) throw new Error(NO_SAMPLES);
     const span = hi - lo;
@@ -205,7 +305,7 @@ export class GameEngine {
       for (const session of filters.sessions ?? []) mask |= 1 << SESSION_CODE[session];
     }
     if (mask === 0 || mask === ALL_SESSIONS_MASK) {
-      return () => pool[lo + Math.floor(this.random() * span)]!;
+      return () => pool.at(lo + Math.floor(this.random() * span));
     }
 
     const codes = this.sessionCodes(symbol, playTf);
@@ -213,30 +313,47 @@ export class GameEngine {
     let total = -1;
     return () => {
       for (let n = 0; n < SESSION_REJECTION_TRIES; n++) {
-        const i = pool[lo + Math.floor(this.random() * span)]!;
+        const i = pool.at(lo + Math.floor(this.random() * span));
         if (matches(i)) return i;
       }
       if (total < 0) {
         total = 0;
-        for (let p = lo; p < hi; p++) if (matches(pool[p]!)) total++;
+        pool.find(lo, hi, (i) => {
+          if (matches(i)) total++;
+          return false;
+        });
       }
       if (total === 0) throw new Error(NO_SAMPLES);
       let k = Math.floor(this.random() * total);
-      for (let p = lo; p < hi; p++) {
-        if (matches(pool[p]!) && k-- === 0) return pool[p]!;
-      }
-      throw new Error(NO_SAMPLES);
+      const picked = pool.find(lo, hi, (i) => matches(i) && k-- === 0);
+      if (picked < 0) throw new Error(NO_SAMPLES);
+      return picked;
     };
   }
 
-  cacheSizes(): { pools: number; sessionCodes: number; bracketMaps: number; bracketLabels: number } {
+  cacheSizes(): {
+    pools: number;
+    poolBytes: number;
+    sessionCodes: number;
+    bracketMaps: number;
+    bracketLabels: number;
+    bracketLabelBytes: number;
+  } {
+    let poolBytes = 0;
+    for (const p of this.basePools.values()) poolBytes += p.bytes;
     let bracketLabels = 0;
-    for (const m of this.bracketLabels.values()) bracketLabels += m.size;
+    let bracketLabelBytes = 0;
+    for (const m of this.bracketLabels.values()) {
+      bracketLabels += m.known;
+      bracketLabelBytes += m.bits.byteLength;
+    }
     return {
       pools: this.basePools.size,
+      poolBytes,
       sessionCodes: this.sessionCodeCache.size,
       bracketMaps: this.bracketLabels.size,
       bracketLabels,
+      bracketLabelBytes,
     };
   }
 
@@ -267,7 +384,7 @@ export class GameEngine {
     const lastBar = s.at(lastIdx);
     const cutoff = s.t[nextIdx]; // open of predicted bar
     // Sanity: last bar must end <= cutoff
-    if (barEndUnix(lastBar.t, playTf) > cutoff) {
+    if (this.barEnd(s, playTf, lastIdx) > cutoff) {
       throw new Error('内部错误：cutoff 与 last bar 不一致');
     }
 
@@ -342,7 +459,7 @@ export class GameEngine {
     const rth = this.rangeThresholds.get(`${p.symbol}:${p.playTf}`)!;
     const rangeBucket = rangeBucketFromBody(body, rth.lowMax, rth.midMax);
 
-    const nextBarEnd = barEndUnix(nextBar.t, p.playTf);
+    const nextBarEnd = this.barEnd(s, p.playTf, p.nextIdx);
     return {
       nextBar,
       actual,
@@ -393,10 +510,10 @@ export class GameEngine {
       const idx = playIdx < p.nextIdx ? p.nextIdx : playIdx;
       hitBar = play.at(idx);
       barsToHit = idx - p.nextIdx + 1;
-      revealUntil = barEndUnix(play.t[idx], p.playTf);
+      revealUntil = this.barEnd(play, p.playTf, idx);
     } else if (Math.min(play.length - 1, p.nextIdx + BRACKET_MAX_BARS - 1) >= p.nextIdx) {
       const maxIdx = Math.min(play.length - 1, p.nextIdx + BRACKET_MAX_BARS - 1);
-      revealUntil = barEndUnix(play.t[maxIdx], p.playTf);
+      revealUntil = this.barEnd(play, p.playTf, maxIdx);
     }
 
     const correct = outcome === 'tp' ? true : outcome === 'sl' ? false : null;
@@ -465,7 +582,7 @@ export class GameEngine {
     let last = -1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      if (barEndUnix(s.t[mid], tf) <= cutoff) {
+      if (this.barEnd(s, tf, mid) <= cutoff) {
         last = mid;
         lo = mid + 1;
       } else {
@@ -526,7 +643,8 @@ export class GameEngine {
       const oldest = this.bracketLabels.keys().next().value;
       if (oldest != null) this.bracketLabels.delete(oldest);
     }
-    const created: BracketLabels = new Map();
+    const length = this.getSeries(symbol, playTf).length;
+    const created: BracketLabels = { bits: new Uint8Array(Math.ceil(length / 4)), known: 0 };
     this.bracketLabels.set(key, created);
     return created;
   }
@@ -537,8 +655,10 @@ export class GameEngine {
     playTf: Timeframe,
     lastIdx: number,
     atrMultiple: number,
-  ): 'up' | 'down' | 'none' {
-    const cached = labels.get(lastIdx);
+  ): BracketSide {
+    const byte = lastIdx >> 2;
+    const shift = (lastIdx & 3) * 2;
+    const cached = BRACKET_SIDES[(labels.bits[byte]! >> shift) & 3];
     if (cached) return cached;
     const play = this.getSeries(symbol, playTf);
     const entry = play.c[lastIdx];
@@ -546,9 +666,9 @@ export class GameEngine {
     const minD = minBracketDistance(atr, PRICE_TICK);
     const distance = defaultBracketDistance(atr, minD, atrMultiple, PRICE_TICK);
     const hit = this.findBracketTouch(symbol, playTf, lastIdx, entry + distance, entry - distance);
-    const label: 'up' | 'down' | 'none' = hit == null ? 'none' : hit.outcome === 'tp' ? 'up' : 'down';
-    if (labels.size >= BRACKET_LABELS_PER_MAP) labels.clear();
-    labels.set(lastIdx, label);
+    const label: BracketSide = hit == null ? 'none' : hit.outcome === 'tp' ? 'up' : 'down';
+    labels.bits[byte]! |= BRACKET_SIDE_CODE[label] << shift;
+    labels.known++;
     return label;
   }
 
@@ -568,7 +688,7 @@ export class GameEngine {
     const nextIdx = lastIdx + 1;
     const maxIdx = Math.min(play.length - 1, nextIdx + BRACKET_MAX_BARS - 1);
     if (maxIdx < nextIdx) return null;
-    const scanUntil = barEndUnix(play.t[maxIdx], playTf);
+    const scanUntil = this.barEnd(play, playTf, maxIdx);
     let i = m1.indexAtOrAfter(play.t[nextIdx]);
     let prev = play.c[lastIdx];
     if (playTf !== '1m') {

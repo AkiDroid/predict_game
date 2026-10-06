@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BRACKET_LABEL_MAPS, BRACKET_LABELS_PER_MAP, GameEngine } from './gameEngine.ts';
+import { BRACKET_LABEL_MAPS, GameEngine } from './gameEngine.ts';
 import { BarSeries } from './binary.ts';
 import type { RoundStore, StoredRound } from './roundStore.ts';
 import { BRACKET_MAX_BARS, firstTouch } from '../src/lib/bracket.ts';
@@ -7,7 +7,7 @@ import { censorBars } from '../src/lib/censor.ts';
 import { barEndUnix, resampleOHLCV } from '../src/lib/resample.ts';
 import { sessionBucket } from '../src/lib/session.ts';
 import { chicagoLocalToUtcMs } from '../src/lib/time.ts';
-import type { Bar, Direction, Timeframe } from '../src/lib/types.ts';
+import type { Bar, Direction, GameFilters, PlayMode, Timeframe } from '../src/lib/types.ts';
 
 const T0 = 1_700_000_000;
 
@@ -153,9 +153,79 @@ describe('eligible samples', () => {
     }
     const sizes = engine.cacheSizes();
     expect(sizes.pools).toBe(2);
+    // Only the 1000 odd-indexed dojis are stored, not the eligible indices.
+    expect(sizes.poolBytes).toBeLessThanOrEqual(1000 * 4);
     expect(sizes.sessionCodes).toBe(1);
-    expect(sizes.bracketMaps).toBeLessThanOrEqual(BRACKET_LABEL_MAPS);
-    expect(sizes.bracketLabels).toBeLessThanOrEqual(BRACKET_LABEL_MAPS * BRACKET_LABELS_PER_MAP);
+    expect(sizes.bracketMaps).toBe(BRACKET_LABEL_MAPS);
+    expect(sizes.bracketLabelBytes).toBe(BRACKET_LABEL_MAPS * Math.ceil(2000 / 4));
+    expect(sizes.bracketLabels).toBeGreaterThan(0);
+    expect(sizes.bracketLabels).toBeLessThanOrEqual(BRACKET_LABEL_MAPS * 2000);
+  });
+
+  it('draws exactly what the full-array pools drew', () => {
+    const start = Math.floor(chicagoLocalToUtcMs(2024, 6, 3, 0, 0) / 1000);
+    const shape = mulberry32(21);
+    const bars: Bar[] = [];
+    for (let i = 0; i < 3 * 24 * 60; i++) {
+      const flat = i >= 1500 && i < 1530;
+      const o = 100;
+      const c = flat ? 100 : shape() < 0.3 ? 100 : shape() < 0.5 ? 101 : 99;
+      bars.push({ t: start + i * 60, o, h: flat ? 100 : 102, l: flat ? 100 : 98, c, v: 1 });
+    }
+    const series = new BarSeries(bars);
+    const sessions = ['asia', 'europe', 'america_rth', 'america_eth'] as const;
+    for (const mode of ['direction', 'bracket'] as const) {
+      const engine = new GameEngine(new MemoryRounds(), mulberry32(99));
+      engine.setSeries('ES', '1m', series);
+      const reference = new ReferenceSampler(series, mode, mulberry32(99));
+      const pick = mulberry32(5);
+      for (let n = 0; n < 400; n++) {
+        const filters: GameFilters = {};
+        if (pick() < 0.7) filters.dateFrom = start + Math.floor(pick() * 3 * 86400);
+        if (pick() < 0.7) filters.dateTo = (filters.dateFrom ?? start) + Math.floor(pick() * 20 * 3600);
+        if (pick() < 0.6) filters.sessions = sessions.filter(() => pick() < 0.4);
+        let got: number | string;
+        try {
+          got = series.indexAtOrBefore(engine.createRound('ES', '1m', filters, mode).lastBar.t);
+        } catch (err) {
+          got = String(err);
+        }
+        let want: number | string;
+        try {
+          want = reference.draw(filters);
+        } catch (err) {
+          want = String(err);
+        }
+        expect(got, `${mode} #${n} ${JSON.stringify(filters)}`).toEqual(want);
+      }
+      expect(reference.countedFallbacks).toBeGreaterThan(0);
+    }
+  });
+
+  it('prewarms every series and samples the same afterwards', () => {
+    const bars: Bar[] = [];
+    for (let i = 0; i < 600; i++) bars.push(bar(i, 100, 102, 98, i % 3 ? 101 : 99));
+    const daily: Bar[] = [];
+    for (let d = 0; d < 300; d++) {
+      const open = Math.floor(chicagoLocalToUtcMs(2023, 1, 1 + d, 17, 0) / 1000);
+      daily.push({ t: open, o: 100, h: 102, l: 98, c: d % 2 ? 101 : 99, v: 1 });
+    }
+    const cold = new GameEngine(new MemoryRounds(), mulberry32(4));
+    const warm = new GameEngine(new MemoryRounds(), mulberry32(4));
+    for (const engine of [cold, warm]) {
+      engine.setSeries('ES', '1m', new BarSeries(bars));
+      engine.setSeries('ES', '1d', new BarSeries(daily));
+    }
+    warm.prewarm();
+    expect(warm.cacheSizes()).toMatchObject({ pools: 4, sessionCodes: 1 });
+    for (let n = 0; n < 30; n++) {
+      const tf = n % 2 ? '1d' : '1m';
+      const filters = { sessions: ['asia' as const] };
+      const a = cold.createRound('ES', tf, filters, 'direction');
+      const b = warm.createRound('ES', tf, filters, 'direction');
+      expect({ ...b, roundId: '' }).toEqual({ ...a, roundId: '' });
+      expect(warm.reveal(b.roundId, 'up')).toEqual(cold.reveal(a.roundId, 'up'));
+    }
   });
 
   it('ignores session filters on daily rounds and labels them by trade date', () => {
@@ -276,6 +346,68 @@ function naiveBars(
     return candidates.slice(0, limit);
   }
   return candidates.slice(Math.max(0, candidates.length - limit));
+}
+
+/** The previous sampler: every eligible index in an Int32Array. */
+class ReferenceSampler {
+  countedFallbacks = 0;
+  private readonly pool: Int32Array;
+  private readonly s: BarSeries;
+  private readonly random: () => number;
+
+  constructor(s: BarSeries, mode: PlayMode, random: () => number) {
+    this.s = s;
+    this.random = random;
+    const out: number[] = [];
+    if (mode === 'bracket') {
+      const ring = new Float64Array(14);
+      let sum = 0;
+      for (let i = 1; i < s.length - 1; i++) {
+        const tr = Math.max(s.h[i]! - s.l[i]!, Math.abs(s.h[i]! - s.c[i - 1]!), Math.abs(s.l[i]! - s.c[i - 1]!));
+        sum += tr;
+        const slot = (i - 1) % 14;
+        if (i > 14) sum -= ring[slot]!;
+        ring[slot] = tr;
+        if (i >= 200 && sum > 0) out.push(i);
+      }
+    } else {
+      for (let i = 200; i < s.length - 1; i++) if (s.c[i + 1] !== s.o[i + 1]) out.push(i);
+    }
+    this.pool = Int32Array.from(out);
+  }
+
+  draw(filters: GameFilters): number {
+    const { pool, s } = this;
+    const lowerBound = (value: number) => {
+      let lo = 0;
+      let hi = pool.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (pool[mid]! < value) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+    const lo = filters.dateFrom != null ? lowerBound(s.indexAtOrAfter(filters.dateFrom) - 1) : 0;
+    const hi = filters.dateTo != null ? lowerBound(s.indexAtOrAfter(Math.floor(filters.dateTo) + 1) - 1) : pool.length;
+    const noSamples = new Error('没有符合条件的样本（检查日期/时段过滤，或数据是否已预处理）');
+    if (lo >= hi) throw noSamples;
+    const span = hi - lo;
+    const wanted = new Set(filters.sessions ?? []);
+    if (wanted.size === 0 || wanted.size === 4) return pool[lo + Math.floor(this.random() * span)]!;
+    const matches = (i: number) => wanted.has(sessionBucket(s.t[i + 1]!));
+    for (let n = 0; n < 64; n++) {
+      const i = pool[lo + Math.floor(this.random() * span)]!;
+      if (matches(i)) return i;
+    }
+    this.countedFallbacks++;
+    let total = 0;
+    for (let p = lo; p < hi; p++) if (matches(pool[p]!)) total++;
+    if (total === 0) throw noSamples;
+    let k = Math.floor(this.random() * total);
+    for (let p = lo; p < hi; p++) if (matches(pool[p]!) && k-- === 0) return pool[p]!;
+    throw noSamples;
+  }
 }
 
 function mulberry32(seed: number): () => number {

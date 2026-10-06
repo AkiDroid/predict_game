@@ -18,6 +18,30 @@ export function encodeBars(symbol: string, tf: string, bars: Bar[]): Buffer {
   buf.writeUInt32LE(tfBuf.length, o); o += 4;
   tfBuf.copy(buf, o); o += tfBuf.length;
 
+  if (LITTLE_ENDIAN) {
+    const t = new Int32Array(count);
+    const cols = [new Float32Array(count), new Float32Array(count), new Float32Array(count), new Float32Array(count), new Float32Array(count)];
+    const [open, high, low, close, vol] = cols;
+    for (let i = 0; i < count; i++) {
+      const b = bars[i];
+      // writeInt32LE's range check; Int32Array would silently wrap.
+      if (b.t > 0x7fffffff || b.t < -0x80000000) buf.writeInt32LE(b.t, o);
+      t[i] = b.t;
+      open[i] = b.o;
+      high[i] = b.h;
+      low[i] = b.l;
+      close[i] = b.c;
+      vol[i] = b.v;
+    }
+    buf.set(new Uint8Array(t.buffer), o);
+    o += count * 4;
+    for (const col of cols) {
+      buf.set(new Uint8Array(col.buffer), o);
+      o += count * 4;
+    }
+    return buf;
+  }
+
   for (let i = 0; i < count; i++) buf.writeInt32LE(bars[i].t, o + i * 4);
   o += count * 4;
   for (let i = 0; i < count; i++) buf.writeFloatLE(bars[i].o, o + i * 4);
@@ -64,51 +88,58 @@ function readHeader(buf: Buffer): PbarHeader {
   return { symbol, tf, count, offset: o };
 }
 
-type ColumnCtor<T extends Int32Array | Float32Array> = {
-  new (length: number): T;
-  new (buffer: ArrayBufferLike, byteOffset: number, length: number): T;
-};
+/** A view may pin at most this many bytes beyond `buf` itself (Node's Buffer pool slab is 8 KiB). */
+const MAX_PINNED_SLACK = 64 * 1024;
 
-/** Copy one PBAR column. Aligned little-endian input is a single memcpy. */
-function copyColumn<T extends Int32Array | Float32Array>(
-  buf: Buffer,
-  offset: number,
-  count: number,
-  Ctor: ColumnCtor<T>,
-  read: (byteOffset: number) => number,
-): T {
-  const out = new Ctor(count);
-  if (count === 0) return out;
+/**
+ * Column views over the PBAR body. Little-endian input whose body starts 4-byte
+ * aligned is not copied: the arrays alias `buf`'s memory. Otherwise the body is
+ * copied once into a fresh aligned buffer.
+ */
+function readColumns(buf: Buffer, offset: number, count: number): PackedColumns {
   const nbytes = count * 4;
-  if (offset < 0 || offset + nbytes > buf.length) throw new RangeError('truncated PBAR column');
+  if (count > 0 && (offset < 0 || offset + nbytes * 6 > buf.length)) throw new RangeError('truncated PBAR column');
+  if (!LITTLE_ENDIAN) return readColumnsPortable(buf, offset, count);
+  let backing: ArrayBufferLike;
+  let base: number;
   const start = buf.byteOffset + offset;
-  if (LITTLE_ENDIAN && (start & 3) === 0) {
-    out.set(new Ctor(buf.buffer, start, count));
-    return out;
+  if ((start & 3) === 0 && buf.buffer.byteLength - buf.byteLength <= MAX_PINNED_SLACK) {
+    backing = buf.buffer;
+    base = start;
+  } else {
+    const body = new Uint8Array(nbytes * 6);
+    body.set(buf.subarray(offset, offset + nbytes * 6));
+    backing = body.buffer;
+    base = 0;
   }
-  if (LITTLE_ENDIAN) {
-    const bytes = new Uint8Array(count * 4);
-    bytes.set(buf.subarray(offset, offset + count * 4));
-    out.set(new Ctor(bytes.buffer, 0, count));
-    return out;
-  }
-  for (let i = 0; i < count; i++) out[i] = read(offset + i * 4);
-  return out;
+  return {
+    t: new Int32Array(backing, base, count),
+    o: new Float32Array(backing, base + nbytes, count),
+    h: new Float32Array(backing, base + nbytes * 2, count),
+    l: new Float32Array(backing, base + nbytes * 3, count),
+    c: new Float32Array(backing, base + nbytes * 4, count),
+    v: new Float32Array(backing, base + nbytes * 5, count),
+  };
 }
 
-function readColumns(buf: Buffer, offset: number, count: number): PackedColumns {
+function readColumnsPortable(buf: Buffer, offset: number, count: number): PackedColumns {
+  const copyColumn = <T extends Int32Array | Float32Array>(out: T, read: (byteOffset: number) => number): T => {
+    for (let i = 0; i < count; i++) out[i] = read(o + i * 4);
+    return out;
+  };
   let o = offset;
-  const t = copyColumn(buf, o, count, Int32Array, (at) => buf.readInt32LE(at));
+  const float = (at: number) => buf.readFloatLE(at);
+  const t = copyColumn(new Int32Array(count), (at) => buf.readInt32LE(at));
   o += count * 4;
-  const open = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  const open = copyColumn(new Float32Array(count), float);
   o += count * 4;
-  const h = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  const h = copyColumn(new Float32Array(count), float);
   o += count * 4;
-  const l = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  const l = copyColumn(new Float32Array(count), float);
   o += count * 4;
-  const c = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  const c = copyColumn(new Float32Array(count), float);
   o += count * 4;
-  const v = copyColumn(buf, o, count, Float32Array, (at) => buf.readFloatLE(at));
+  const v = copyColumn(new Float32Array(count), float);
   return { t, o: open, h, l, c, v };
 }
 
@@ -162,6 +193,7 @@ export class BarSeries {
     }
   }
 
+  /** The series may share memory with `buf`, so the caller must not modify `buf` afterwards. */
   static fromBuffer(buf: Buffer): BarSeries {
     const header = readHeader(buf);
     return new BarSeries([], readColumns(buf, header.offset, header.count));

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { SymbolId, Timeframe } from '../../../../src/lib/types.ts';
 import { TIMEFRAMES } from '../../../../src/lib/types.ts';
 import { requireAuth } from '../auth/plugin.ts';
+import { barsResponseSchema } from './schemas.ts';
 
 const SYMBOLS = ['ES', 'NQ'] as const;
 
@@ -55,6 +56,7 @@ export async function marketRoutes(app: FastifyInstance): Promise<void> {
             limit: { type: 'integer', minimum: 1, maximum: 8000 },
           },
         },
+        response: { 200: barsResponseSchema },
       },
     },
     async (request) => {

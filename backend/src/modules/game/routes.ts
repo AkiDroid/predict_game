@@ -2,6 +2,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Direction, GameFilters, PlayMode, SamplingMode, SymbolId, Timeframe } from '../../../../src/lib/types.ts';
 import { TIMEFRAMES } from '../../../../src/lib/types.ts';
 import { requireAuth } from '../auth/plugin.ts';
+import {
+  errorResponseSchema,
+  revealBracketResponseSchema,
+  revealResponseSchema,
+  roundNextResponseSchema,
+} from './schemas.ts';
 
 const SYMBOLS = ['ES', 'NQ'] as const;
 const SESSIONS = ['asia', 'europe', 'america_rth', 'america_eth'] as const;
@@ -37,6 +43,7 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
             },
           },
         },
+        response: { 200: roundNextResponseSchema, 400: errorResponseSchema },
       },
     },
     async (request, reply) => {
@@ -76,6 +83,7 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
             predicted: { type: 'string', enum: ['up', 'down'] },
           },
         },
+        response: { 200: revealResponseSchema, 400: errorResponseSchema },
       },
     },
     async (request, reply) => {
@@ -103,6 +111,7 @@ export async function gameRoutes(app: FastifyInstance): Promise<void> {
             distance: { type: 'number', exclusiveMinimum: 0 },
           },
         },
+        response: { 200: revealBracketResponseSchema, 400: errorResponseSchema },
       },
     },
     async (request, reply) => {

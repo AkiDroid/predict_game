@@ -45,5 +45,6 @@ export function loadMarketData(
       loaded++;
     }
   }
+  engine.prewarm();
   return { ok: true, loaded };
 }
