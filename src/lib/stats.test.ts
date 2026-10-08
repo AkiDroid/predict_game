@@ -38,3 +38,51 @@ describe('stats matches the reference implementation', () => {
     expect(elapsed).toBeLessThan(2000);
   });
 });
+
+
+describe('direction slices across game modes', () => {
+  const base = randomRounds(1, 1)[0];
+  const round = (fields: Partial<typeof base>) => ({ ...base, skipped: false, ...fields });
+
+  it('counts long/short wins and losses even with only bracket history', () => {
+    const report = computeStats([
+      round({ mode: 'bracket', predicted: 'up', actual: 'up', correct: true, outcome: 'tp' }),
+      round({ mode: 'bracket', predicted: 'up', actual: 'down', correct: false, outcome: 'sl' }),
+      round({ mode: 'bracket', predicted: 'down', actual: 'down', correct: true, outcome: 'tp' }),
+      round({ mode: 'bracket', predicted: 'down', actual: 'up', correct: false, outcome: 'sl' }),
+      round({ mode: 'bracket', predicted: 'up', actual: null, correct: null, outcome: 'unresolved' }),
+      round({ mode: 'bracket', predicted: null, actual: null, correct: null, skipped: true }),
+    ]);
+    for (const slices of [report.byPredicted, report.byActual]) {
+      expect(slices).toHaveLength(2);
+      for (const slice of slices) {
+        expect(slice).toMatchObject({ n: 2, wins: 1, losses: 1, skips: 0, winRate: 0.5 });
+      }
+    }
+    expect(report.overall).toMatchObject({ total: 6, answered: 4, skips: 1, unresolved: 1 });
+  });
+
+  it('includes legacy direction records and never labels absent directions as down', () => {
+    const report = computeStats([
+      round({ mode: undefined, predicted: 'up', actual: 'up', correct: true }),
+      round({ mode: 'direction', predicted: 'down', actual: 'up', correct: false }),
+      round({ mode: 'bracket', predicted: 'down', actual: 'down', correct: true }),
+      round({ mode: 'bracket', predicted: null, actual: null, correct: false }),
+    ]);
+    expect(report.byPredicted.find((s) => s.key === 'up')).toMatchObject({ n: 1, wins: 1 });
+    expect(report.byPredicted.find((s) => s.key === 'down')).toMatchObject({ n: 2, wins: 1 });
+    expect(report.byActual.find((s) => s.key === 'up')).toMatchObject({ n: 2, wins: 1 });
+    expect(report.byActual.find((s) => s.key === 'down')).toMatchObject({ n: 1, wins: 1 });
+    expect(report.byPredicted.map((s) => s.key).sort()).toEqual(['down', 'up']);
+    expect(report.byActual.map((s) => s.key).sort()).toEqual(['down', 'up']);
+  });
+
+  it('leaves both slices empty when every round is skipped or unresolved', () => {
+    const report = computeStats([
+      round({ mode: 'bracket', predicted: 'down', actual: null, correct: null, outcome: 'unresolved' }),
+      round({ predicted: null, actual: null, correct: null, skipped: true }),
+    ]);
+    expect(report.byPredicted).toEqual([]);
+    expect(report.byActual).toEqual([]);
+  });
+});

@@ -231,14 +231,13 @@ export function computeStats(rounds: RoundRecord[]): StatsReport {
     (a, b) => Number(a.key) - Number(b.key),
   );
   const scored = rounds.filter((r) => isScored(r));
-  const directionScored = scored.filter((r) => (r.mode ?? 'direction') === 'direction');
   const byPredicted = groupBy(
-    directionScored,
+    scored.filter((r) => r.predicted === 'up' || r.predicted === 'down'),
     (r) => r.predicted as Direction,
-    (k) => (k === 'up' ? '猜涨' : '猜跌'),
+    (k) => (k === 'up' ? '猜涨 / 做多' : '猜跌 / 做空'),
   );
   const byActual = groupBy(
-    directionScored,
+    scored.filter((r) => r.actual === 'up' || r.actual === 'down'),
     (r) => r.actual as Direction,
     (k) => (k === 'up' ? '实际上涨局' : '实际下跌局'),
   );

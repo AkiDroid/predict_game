@@ -187,8 +187,8 @@ export function StatsPage() {
         <SliceTable title="按交易时段" rows={report.bySession} />
         <SliceTable title="按星期" rows={report.byDow} />
         <SliceTable title="按小时（Chicago）" rows={report.byHour} />
-        <SliceTable title="按预测方向" rows={report.byPredicted} />
-        <SliceTable title="按实际方向" rows={report.byActual} />
+        <SliceTable title="按预测方向" rows={report.byPredicted} note="统计两种模式的已结算对局：猜涨 / 做多、猜跌 / 做空。" />
+        <SliceTable title="按实际方向" rows={report.byActual} note="方向模式按目标 K 线涨跌；止盈止损按价格先触及的上方 / 下方边界。跳过与未触及不计入。" />
         <SliceTable title="按波动分位（先验 ATR%）" rows={report.byVol} />
         <SliceTable title="按实体大小（事后分析）" rows={report.byRange} note="事后分析：揭晓后才可知，不可用于当手下注。" />
       </div>
@@ -327,6 +327,7 @@ function SliceTable({ title, rows, note }: { title: string; rows: SliceStat[]; n
             </tr>
           </thead>
           <tbody>
+            {rows.length === 0 ? <tr><td colSpan={5} className="muted">暂无可统计的对局。</td></tr> : null}
             {rows.map((r) => (
               <tr key={r.key}>
                 <td>
