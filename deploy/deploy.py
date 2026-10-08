@@ -17,7 +17,7 @@ import paramiko
 from dotenv import dotenv_values
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCLUDED = {'.git', '.deploy', '.agents', '.codex', '.aws', 'node_modules',
+EXCLUDED = {'.git', '.deploy', '.agents', '.codex', '.aws', '.ssh', 'node_modules',
             'dist', 'dist-ssr', 'data', 'coverage', '.venv', 'venv', '__pycache__',
             '.pytest_cache', '.vscode', '.idea'}
 
@@ -62,7 +62,7 @@ def load_config(root: Path) -> dict:
     if not (root / '.env').is_file():
         raise ValueError('缺少根目录 .env，请按 .env.example 填写 SSH 连接信息。')
     values = dotenv_values(root / '.env', encoding='utf-8-sig', interpolate=False)
-    for field in ('SERVER_HOST', 'SERVER_USER', 'SERVER_PASSWORD'):
+    for field in ('SERVER_HOST', 'SERVER_USER'):
         if not values.get(field):
             raise ValueError(f'根目录 .env 缺少 {field}。')
     port = int(values.get('SERVER_PORT') or '22')
@@ -72,8 +72,27 @@ def load_config(root: Path) -> dict:
     if (not path.startswith('/') or path.rstrip('/') in ('', '/opt', '/home', '/usr', '/var', '/tmp', '/etc', '/srv', '/root', '/bin', '/sbin', '/lib', '/boot', '/dev', '/proc', '/sys', '/run')
             or any(part in ('.', '..') for part in path.split('/')) or '\n' in path or '\r' in path):
         raise ValueError('SERVER_DEPLOY_PATH 必须是专用的绝对项目目录，不能是系统目录。')
+    key = values.get('SERVER_SSH_KEY') or None
+    if key:
+        key_path = Path(key).expanduser()
+        if not key_path.is_absolute():
+            key_path = root / key_path
+        key_path = key_path.resolve()
+        if not key_path.is_file():
+            raise ValueError('SERVER_SSH_KEY 指定的私钥文件不存在。')
+        if key_path.is_relative_to(root.resolve()):
+            raise ValueError('SSH 私钥请存放在项目目录之外（如 ~/.ssh/），避免随代码上传。')
+        key = str(key_path)
     return dict(host=values['SERVER_HOST'], user=values['SERVER_USER'],
-                password=values['SERVER_PASSWORD'], port=port, path=path.rstrip('/'))
+                key=key, port=port, path=path.rstrip('/'))
+
+
+def connect_client(client, config: dict) -> None:
+    # With password=None, Paramiko only tries public keys (including SSH Agent).
+    client.connect(config['host'], port=config['port'], username=config['user'],
+                   key_filename=config['key'], password=None,
+                   look_for_keys=not bool(config['key']), allow_agent=True,
+                   timeout=20, auth_timeout=30, banner_timeout=30)
 
 
 class PinFirstHostKey(paramiko.MissingHostKeyPolicy):
@@ -176,9 +195,7 @@ def main() -> int:
                 client.load_host_keys(str(known_hosts))
             client.set_missing_host_key_policy(PinFirstHostKey(known_hosts))
             print('连接服务器并检查部署条件…', flush=True)
-            client.connect(config['host'], port=config['port'], username=config['user'],
-                           password=config['password'], look_for_keys=False, allow_agent=False,
-                           timeout=20, auth_timeout=30, banner_timeout=30)
+            connect_client(client, config)
             client.get_transport().set_keepalive(30)
             path = shlex.quote(config['path'])
             run(client, 'bash -s', f'''set -euo pipefail
@@ -214,7 +231,11 @@ if __name__ == '__main__':
         sys.exit(130)
     except Exception as error:
         # Never print arbitrary SSH exceptions: they can contain connection details.
-        if isinstance(error, (ValueError, RuntimeError)):
+        if isinstance(error, paramiko.PasswordRequiredException):
+            print('部署失败：私钥已加密，请先用 ssh-add 将私钥加入 SSH Agent，再执行部署。', file=sys.stderr)
+        elif isinstance(error, paramiko.AuthenticationException):
+            print('部署失败：SSH 密钥认证失败，请确认对应公钥已加入服务器用户的 ~/.ssh/authorized_keys；加密私钥请先用 ssh-add 加入 SSH Agent。', file=sys.stderr)
+        elif isinstance(error, (ValueError, RuntimeError)):
             print(f'部署失败：{error}', file=sys.stderr)
         else:
             print(f'部署失败（{type(error).__name__}）：请检查网络、SSH 凭据或服务器指纹。', file=sys.stderr)

@@ -12,9 +12,11 @@
 
 ## 本机服务器连接配置
 
-项目根目录 `.env` 保存本机部署时使用的 SSH 连接信息。首次填写 `SERVER_HOST`（IP 或域名）、`SERVER_USER` 和 `SERVER_PASSWORD`；`SERVER_PORT` 默认 `22`，`SERVER_DEPLOY_PATH` 默认 `/opt/predict-game`。文件丢失时可从根目录 `.env.example` 复制重新填写。
+项目根目录 `.env` 保存本机部署时使用的 SSH 连接信息。填写 `SERVER_HOST`（IP 或域名）和 `SERVER_USER`；`SERVER_PORT` 默认 `22`，`SERVER_DEPLOY_PATH` 默认 `/opt/predict-game`。部署只使用 SSH 密钥认证，无需服务器密码。文件丢失时可从根目录 `.env.example` 复制重新填写。
 
-以后让 Codex 部署时，先读取该文件并复用已填写的信息，只询问缺失或失效的字段。读取时按 dotenv 格式解析，不执行文件内容；密码不要放进命令行参数或日志。
+`SERVER_SSH_KEY` 留空时，脚本使用本机 SSH Agent 和 `~/.ssh/` 中的默认私钥（如 `id_rsa`、`id_ed25519`）。自定义私钥可设置 `SERVER_SSH_KEY=~/.ssh/my_deploy_key` 或绝对路径；Windows 路径建议使用正斜杠。私钥放在项目目录之外，不能上传到服务器；将对应 `.pub` 公钥预先加入服务器用户的 `~/.ssh/authorized_keys`。加密私钥应先通过 `ssh-add` 加入 SSH Agent，脚本不保存或询问私钥口令。脚本不会读取 OpenSSH 的 `~/.ssh/config`，因此请在 `.env` 填实际主机、用户名、端口；自定义 IdentityFile 用 `SERVER_SSH_KEY` 指定。
+
+以后让 Codex 部署时，先读取该文件并复用已填写的信息，只询问缺失或失效的字段。读取时按 dotenv 格式解析，不执行文件内容或进行环境变量插值。旧的 `SERVER_PASSWORD` 字段不会用于认证，建议删除。
 
 根目录 `.env` 与服务器上的 `deploy/.env` 用途不同：前者保存 SSH 凭据，后者配置应用、站点和 Redis。根目录 `.env` 不提交到 Git，不进入 Docker 构建上下文，也不上传到服务器。`.env.example` 只保留空字段。
 
@@ -30,7 +32,7 @@
 
 脚本直接打包当前本地文件，包含尚未提交的修改，无需 `git commit`、`git push` 或服务器 `git pull`。流程为：
 
-1. 按 dotenv 格式读取根目录 `.env`，密码不进行环境变量插值或 shell 执行。
+1. 按 dotenv 格式读取根目录 `.env`，通过本机 SSH 私钥 / SSH Agent 认证，不使用服务器密码。
 2. 打包代码，排除所有层级的 `.env` / `.env.*`（包括示例）、`data/`、Git、依赖、构建产物及本机部署环境；Shell 脚本自动转为 LF 换行并设置执行权限。
 3. 用 SSH 检查服务器目录、Docker / Compose 权限，以及 `rsync`、`tar`、`flock`。服务器缺少 rsync 时先执行 `sudo apt-get install -y rsync`。
 4. 上传到服务器临时目录，取得部署锁；验证已有应用配置和行情。已有 SQLite 时先用当前服务执行 `deploy/backup.sh`，备份失败则中止更新。
