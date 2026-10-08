@@ -25,3 +25,7 @@ data/
 *.njsproj
 *.sln
 *.sw?
+
+# 本地环境配置及凭据；只允许提交无真实凭据的示例。
+.env.*
+!.env.example

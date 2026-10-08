@@ -85,4 +85,15 @@ describe('direction slices across game modes', () => {
     expect(report.byPredicted).toEqual([]);
     expect(report.byActual).toEqual([]);
   });
+
+  it('does not score skipped rounds even when their results are revealed', () => {
+    const report = computeStats([
+      round({ mode: 'direction', predicted: null, actual: 'up', correct: null, skipped: true }),
+      round({ mode: 'bracket', predicted: null, actual: 'down', correct: null, skipped: true, outcome: 'sl' }),
+      round({ mode: 'bracket', predicted: null, actual: null, correct: null, skipped: true, outcome: 'unresolved' }),
+    ]);
+    expect(report.overall).toMatchObject({ total: 3, answered: 0, wins: 0, losses: 0, skips: 3, unresolved: 0 });
+    expect(report.byPredicted).toEqual([]);
+    expect(report.byActual).toEqual([]);
+  });
 });

@@ -38,6 +38,7 @@ import { VOL_LABELS } from '../lib/volatility';
 type Phase = 'idle' | 'deciding' | 'revealed';
 
 type PlayResult = {
+  skipped?: boolean;
   correct: boolean | null;
   predicted: Direction;
   actual: Direction | null;
@@ -227,7 +228,7 @@ export function PlayPage() {
   }, [saveError, mode]);
 
   const answer = useCallback(
-    async (predicted: Direction) => {
+    async (predicted: Direction, skipped = false) => {
       if (!ctx || phase !== 'deciding' || actionLock.current) return;
       actionLock.current = true;
       const tfAtAnswer = chartTfRef.current;
@@ -240,7 +241,8 @@ export function PlayPage() {
           return;
         }
         const revealed: PlayResult = {
-          correct: res.correct,
+          skipped,
+          correct: skipped ? null : res.correct,
           predicted: res.predicted,
           actual: res.actual,
           nextBar: res.nextBar,
@@ -254,10 +256,10 @@ export function PlayPage() {
           playTf: settings.playTf,
           chartTf: tfAtAnswer,
           mode: 'direction',
-          predicted: res.predicted,
+          predicted: skipped ? null : res.predicted,
           actual: res.actual,
-          correct: res.correct,
-          skipped: false,
+          correct: skipped ? null : res.correct,
+          skipped,
           cutoff: res.meta.cutoff,
           nextOpen: res.nextBar.o,
           nextHigh: res.nextBar.h,
@@ -279,7 +281,7 @@ export function PlayPage() {
     [ctx, phase, settings, mode, failReveal, finishReveal],
   );
 
-  const confirmBracket = useCallback(async () => {
+  const confirmBracket = useCallback(async (skipped = false) => {
     if (!ctx || !bracket || phase !== 'deciding' || mode !== 'bracket' || actionLock.current) return;
     actionLock.current = true;
     const tfAtAnswer = chartTfRef.current;
@@ -293,7 +295,8 @@ export function PlayPage() {
         return;
       }
       const revealed: PlayResult = {
-        correct: res.correct,
+        skipped,
+        correct: skipped ? null : res.correct,
         predicted: res.direction,
         actual: res.actual,
         nextBar: res.hitBar,
@@ -314,10 +317,10 @@ export function PlayPage() {
         playTf: settings.playTf,
         chartTf: tfAtAnswer,
         mode: 'bracket',
-        predicted: res.direction,
+        predicted: skipped ? null : res.direction,
         actual: res.actual,
-        correct: res.correct,
-        skipped: false,
+        correct: skipped ? null : res.correct,
+        skipped,
         outcome: res.outcome,
         entry: res.entry,
         takeProfit: res.takeProfit,
@@ -359,45 +362,13 @@ export function PlayPage() {
   );
 
   const skipQuestion = useCallback(async () => {
-    if (!ctx || phase !== 'deciding' || actionLock.current) return;
-    actionLock.current = true;
-    const tfAtSkip = chartTfRef.current;
-    try {
-      const streakBefore = getStreakBeforeNext(mode);
-      await appendRound({
-        id: ctx.roundId,
-        playedAt: Date.now(),
-        symbol: settings.symbol,
-        playTf: settings.playTf,
-        chartTf: tfAtSkip,
-        mode,
-        predicted: null,
-        actual: null,
-        correct: null,
-        skipped: true,
-        cutoff: ctx.cutoff,
-        nextOpen: 0,
-        nextHigh: 0,
-        nextLow: 0,
-        nextClose: 0,
-        session: ctx.session,
-        dayOfWeek: ctx.dayOfWeek,
-        hour: ctx.hour,
-        barRange: 0,
-        rangeBucket: null,
-        volBucket: ctx.volBucket,
-        streakBefore,
-        timeToAnswerMs: Math.round(performance.now() - startedAt.current),
-      });
-      setStatsSnap(summarize(mode));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return;
-    } finally {
-      actionLock.current = false;
+    if (mode === 'bracket') {
+      await confirmBracket(true);
+    } else {
+      // The reveal API requires a direction; skips discard its prediction and score.
+      await answer('up', true);
     }
-    await startRound();
-  }, [ctx, phase, settings, startRound, mode]);
+  }, [mode, confirmBracket, answer]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -719,12 +690,12 @@ export function PlayPage() {
               <>
                 <div
                   className={`result-banner ${
-                    result.outcome === 'unresolved' ? 'open' : result.correct ? 'ok' : 'bad'
+                    result.skipped || result.outcome === 'unresolved' ? 'open' : result.correct ? 'ok' : 'bad'
                   }`}
                 >
                   {result.outcome === 'unresolved'
-                    ? `未触及 · ${result.predicted === 'up' ? '做多' : '做空'} · ${BRACKET_MAX_BARS} 根内没有碰到止盈或止损`
-                    : `${result.correct ? '正确' : '错误'} · ${result.predicted === 'up' ? '做多' : '做空'} · 先碰到${
+                    ? `${result.skipped ? '已跳过 · ' : ''}未触及 · ${result.predicted === 'up' ? '做多' : '做空'} · ${BRACKET_MAX_BARS} 根内没有碰到止盈或止损`
+                    : `${result.skipped ? '已跳过' : result.correct ? '正确' : '错误'} · ${result.predicted === 'up' ? '做多' : '做空'} · 先碰到${
                         result.outcome === 'tp' ? '止盈' : '止损'
                       }${result.barsToHit != null ? ` · 第 ${result.barsToHit} 根` : ''}`}
                   {result.entry != null && result.takeProfit != null && result.stopLoss != null ? (
@@ -761,9 +732,8 @@ export function PlayPage() {
 
             {phase === 'revealed' && result && !result.outcome ? (
               <>
-                <div className={`result-banner ${result.correct ? 'ok' : 'bad'}`}>
-                  {result.correct ? '正确' : '错误'} · 预测
-                  {result.predicted === 'up' ? '涨' : '跌'} · 实际
+                <div className={`result-banner ${result.skipped ? 'open' : result.correct ? 'ok' : 'bad'}`}>
+                  {result.skipped ? '已跳过' : `${result.correct ? '正确' : '错误'} · 预测${result.predicted === 'up' ? '涨' : '跌'}`} · 实际
                   {result.actual === 'up' ? '涨' : '跌'}{' '}
                   {result.nextBar ? (
                     <span className="num" style={{ fontWeight: 500 }}>
@@ -815,8 +785,8 @@ export function PlayPage() {
             </div>
             <p className="muted" style={{ margin: 0, fontSize: 12, lineHeight: 1.55 }}>
               {mode === 'bracket'
-                ? `入场价是截止时刻最后一根已收盘K线的收盘价。止盈和止损相对入场价等距，距离不小于 ATR(14)（向上取整到最小跳动 ${PRICE_TICK}）。之后的 1 分钟走势先碰到止盈算赢，先碰到止损算输；同一根 1 分钟里两边都碰到时，阳线按先下后上、阴线按先上后下。${BRACKET_MAX_BARS} 根预测周期K线内都没碰到则记为未触及，不计胜负。跳过不揭晓、不计胜负。`
-                : '涨 = 收盘 > 开盘；十字星已排除。对局中所有周期数据截止于目标K线开盘时刻 T，揭晓后放宽至该K线收盘。图表周期与预测周期相互独立。跳过不揭晓答案、不计胜负，可无限使用，并记入统计。'}
+                ? `入场价是截止时刻最后一根已收盘K线的收盘价。止盈和止损相对入场价等距，距离不小于 ATR(14)（向上取整到最小跳动 ${PRICE_TICK}）。之后的 1 分钟走势先碰到止盈算赢，先碰到止损算输；同一根 1 分钟里两边都碰到时，阳线按先下后上、阴线按先上后下。${BRACKET_MAX_BARS} 根预测周期K线内都没碰到则记为未触及，不计胜负。跳过按当前方向和距离揭晓结果、不计胜负，点击「下一题」继续。`
+                : '涨 = 收盘 > 开盘；十字星已排除。对局中所有周期数据截止于目标K线开盘时刻 T，揭晓后放宽至该K线收盘。图表周期与预测周期相互独立。跳过仍揭晓答案、不计胜负，可无限使用，并记入统计；点击「下一题」继续。'}
             </p>
           </section>
         </div>

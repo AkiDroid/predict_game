@@ -10,6 +10,14 @@
 
 仓库根目录的 `docker-compose.yml` 只给本地开发起 Redis。生产用 `deploy/docker-compose.yml`，不要在服务器上执行根目录那个文件。
 
+## 本机服务器连接配置
+
+项目根目录 `.env` 保存本机部署时使用的 SSH 连接信息。首次填写 `SERVER_HOST`（IP 或域名）、`SERVER_USER` 和 `SERVER_PASSWORD`；`SERVER_PORT` 默认 `22`，`SERVER_DEPLOY_PATH` 默认 `/opt/predict-game`。文件丢失时可从根目录 `.env.example` 复制重新填写。
+
+以后让 Codex 部署时，先读取该文件并复用已填写的信息，只询问缺失或失效的字段。读取时按 dotenv 格式解析，不执行文件内容；密码不要放进命令行参数或日志。
+
+根目录 `.env` 与服务器上的 `deploy/.env` 用途不同：前者保存 SSH 凭据，后者配置应用、站点和 Redis。根目录 `.env` 不提交到 Git，不进入 Docker 构建上下文，也不上传到服务器。`.env.example` 只保留空字段。
+
 ## 服务器
 
 - Ubuntu 22.04 或 24.04
@@ -54,7 +62,8 @@ rsync -a --delete \
   --exclude node_modules \
   --exclude dist \
   --exclude data \
-  --exclude deploy/.env \
+  --exclude '.env' \
+  --exclude '.env.*' \
   ./ user@SERVER:/opt/predict-game/
 
 rsync -a \
@@ -65,7 +74,7 @@ rsync -a \
   ./data/ user@SERVER:/opt/predict-game/data/
 ```
 
-第一条会同步代码。`deploy/.env` 被排除，不会覆盖服务器上已经填好的配置。第二条同步 `ES_1min.txt`、`NQ_1min.txt` 和已有的 `data/processed/`。服务器上的账户库和备份会留下来。
+第一条会同步代码，排除所有层级的 `.env` 和 `.env.*`；本机 SSH 凭据不会上传，服务器上已有的 `deploy/.env` 不会被覆盖。首次部署需单独上传无真实凭据的 `deploy/.env.example`，供下面的配置步骤使用。第二条同步 `ES_1min.txt`、`NQ_1min.txt` 和已有的 `data/processed/`。服务器上的账户库和备份会留下来。
 
 用部署用户执行 rsync，不要加 `sudo`。脚本会用这个用户的 uid 跑容器，这样才写得了 `data/`。如果目录已经属于 root：
 

@@ -10,3 +10,7 @@ deploy/.env
 coverage
 .vscode
 .idea
+
+# 排除所有层级的环境配置（包括副本），避免凭据进入构建上下文。
+**/.env
+**/.env.*

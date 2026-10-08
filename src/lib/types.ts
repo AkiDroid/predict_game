@@ -74,7 +74,7 @@ export interface RoundRecord {
   mode?: PlayMode;
   /** Null when the round was skipped. */
   predicted: Direction | null;
-  /** Null when the round was skipped (answer is not revealed). */
+  /** Null on older skipped records or when a bracket round remains unresolved. */
   actual: Direction | null;
   /** Null when the round was skipped. */
   correct: boolean | null;
@@ -89,7 +89,7 @@ export interface RoundRecord {
   dayOfWeek: number;
   hour: number;
   barRange: number;
-  /** Null when the round was skipped. */
+  /** Null for bracket rounds and older skipped records. */
   rangeBucket: RangeBucket | null;
   volBucket: VolBucket;
   streakBefore: number;
