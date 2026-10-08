@@ -22,6 +22,8 @@ npm run dev                   # 前端 http://localhost:5173 ，API http://127.0
 
 单台 Ubuntu 上的 Docker 部署（Caddy、应用、Redis）见 [DEPLOY.md](DEPLOY.md)。上面的 `docker compose up -d` 只启动本机开发用的 Redis。
 
+服务器首次部署完成后，在 Windows 本机执行 `.\deploy.ps1`，或双击 `deploy.bat`，即可上传当前修改、构建并更新服务。SSH 信息复用根目录 `.env`，服务器应用配置和数据保留；`.\deploy.ps1 -DryRun` 可先检查本地部署包。
+
 环境变量（都有默认值）：
 
 | 变量 | 默认 | 作用 |
