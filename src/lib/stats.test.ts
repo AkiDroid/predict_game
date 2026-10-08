@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as ref from './__fixtures__/statsReference';
-import { buildEquity, computeOverall, computeStats, currentStreakValue } from './stats';
+import { buildEquity, computeStats } from '../../backend/src/modules/stats/analysis';
+import { computeOverall, currentStreakValue } from './stats';
 import { randomRounds } from './__fixtures__/randomRounds';
 
 describe('stats matches the reference implementation', () => {

@@ -86,6 +86,8 @@ MM/DD/YYYY,HH:mm,open,high,low,close,volume
 需要先注册 / 登录。Session 保存在 **Redis**（httpOnly cookie `sid`），用户账户与对局统计保存在 **SQLite**。
 
 - `POST /api/auth/register`、`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/me`
+- `GET /api/stats/report`：后端计算完整统计报告（胜率、连胜、分片、Wilson 区间、权益曲线和读数），前端直接展示。
+- `GET /api/stats/recent`：按 `symbol`、`playTf`、`mode` 筛选最近对局，按时间和 id 倒序返回最多 100 条；筛选不影响整体统计。
 - `GET/POST/DELETE /api/stats/rounds`、`POST /api/stats/migrate`（一次性上传旧版 localStorage 记录）。单条记录序列化后不超过 4 KB，每个用户最多 10 万条
 - 服务端出题记录（`rounds` 表）揭晓或过期 7 天后自动删除
 - 出题 / 揭晓 / K 线接口需登录；未登录返回 401，前端跳转登录页

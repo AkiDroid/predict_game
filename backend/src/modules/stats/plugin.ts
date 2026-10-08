@@ -1,6 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import type { RoundRecord } from '../../../../src/lib/types.ts';
+import { computeStats } from './analysis.ts';
+import type { RecentRoundsFilters } from '../../../../src/lib/statsTypes.ts';
+import { TIMEFRAMES } from '../../../../src/lib/types.ts';
 import { requireAuth } from '../auth/plugin.ts';
 
 /** A full bracket record serializes to well under 1 KB. */
@@ -42,6 +45,44 @@ async function statsRoutes(app: FastifyInstance): Promise<void> {
   );
   const deleteStmt = app.db.prepare('DELETE FROM user_rounds WHERE user_id = ?');
   const capError = `对局记录已达上限（${MAX_ROUNDS_PER_USER} 条），请先清空统计`;
+
+  const recentStmt = app.db.prepare(
+    `SELECT payload FROM user_rounds
+      WHERE user_id = ? AND json_valid(payload)
+        AND (? IS NULL OR json_extract(payload, '$.symbol') = ?)
+        AND (? IS NULL OR json_extract(payload, '$.playTf') = ?)
+        AND (? IS NULL OR COALESCE(json_extract(payload, '$.mode'), 'direction') = ?)
+      ORDER BY played_at DESC, id DESC LIMIT 100`,
+  );
+
+  app.get('/api/stats/report', { preHandler: requireAuth }, async (request) => {
+    const rows = listStmt.all(request.userId!) as unknown as ListRow[];
+    const rounds = orderedRows(rows).map((row) => JSON.parse(row[2]) as RoundRecord);
+    return computeStats(rounds);
+  });
+
+  app.get<{ Querystring: RecentRoundsFilters }>(
+    '/api/stats/recent',
+    {
+      preHandler: requireAuth,
+      schema: {
+        querystring: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            symbol: { type: 'string', enum: ['ES', 'NQ'] },
+            playTf: { type: 'string', enum: TIMEFRAMES },
+            mode: { type: 'string', enum: ['direction', 'bracket'] },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const { symbol = null, playTf = null, mode = null } = request.query;
+      const rows = recentStmt.all(request.userId!, symbol, symbol, playTf, playTf, mode, mode);
+      return { rounds: rows.map((row) => JSON.parse(String(row.payload)) as RoundRecord) };
+    },
+  );
 
   app.get(
     '/api/stats/rounds',
@@ -153,20 +194,22 @@ type ListRow = [playedAt: number, id: string, payload: string];
 
 /** `{"rounds":[...]}` in `ORDER BY played_at, id` order, built from rows sorted by played_at only. */
 export function listBody(rows: ListRow[]): string {
-  const payloads = new Array<string>(rows.length);
+  return `{"rounds":[${orderedRows(rows).map((row) => row[2]).join(',')}]}`;
+}
+
+/** Keep chronological statistics consistent with the history endpoint, including timestamp ties. */
+function orderedRows(rows: ListRow[]): ListRow[] {
   let i = 0;
   while (i < rows.length) {
     let j = i + 1;
     while (j < rows.length && rows[j]![0] === rows[i]![0]) j++;
     if (j - i > 1) {
       const tie = rows.slice(i, j).sort((a, b) => compareSqliteText(a[1], b[1]));
-      for (let k = 0; k < tie.length; k++) payloads[i + k] = tie[k]![2];
-    } else {
-      payloads[i] = rows[i]![2];
+      for (let k = 0; k < tie.length; k++) rows[i + k] = tie[k]!;
     }
     i = j;
   }
-  return `{"rounds":[${payloads.join(',')}]}`;
+  return rows;
 }
 
 /** SQLite's default BINARY collation compares UTF-8 bytes, which differs from JS for astral chars. */

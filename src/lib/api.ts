@@ -1,3 +1,4 @@
+import type { RecentRoundsFilters, RecentRoundsResponse, StatsReport } from './statsTypes';
 import type {
   Bar,
   BracketReveal,
@@ -98,6 +99,21 @@ export async function logoutUser(): Promise<void> {
 export async function fetchRounds(): Promise<RoundRecord[]> {
   const data = await parse<{ rounds: RoundRecord[] }>(await request('/api/stats/rounds'));
   return data.rounds;
+}
+
+export async function fetchStatsReport(signal?: AbortSignal): Promise<StatsReport> {
+  return parse(await request('/api/stats/report', { signal }));
+}
+
+export async function fetchRecentRounds(
+  filters: RecentRoundsFilters = {},
+  signal?: AbortSignal,
+): Promise<RecentRoundsResponse> {
+  const query = new URLSearchParams();
+  if (filters.symbol) query.set('symbol', filters.symbol);
+  if (filters.playTf) query.set('playTf', filters.playTf);
+  if (filters.mode) query.set('mode', filters.mode);
+  return parse(await request(`/api/stats/recent?${query}`, { signal }));
 }
 
 export async function postRound(round: RoundRecord): Promise<void> {

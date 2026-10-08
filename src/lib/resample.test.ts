@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { censorBars, assertNoLeakage, maxVisibleOpen } from './censor';
 import { resampleOHLCV, barEndUnix, bucketStartUnix } from './resample';
 import { barDirection, isDoji, isWin, scoreRound } from './score';
-import { computeOverall, computeStats } from './stats';
+import { computeOverall } from './stats';
+import { computeStats } from '../../backend/src/modules/stats/analysis';
 import { chicagoLocalToUtcMs } from './time';
 import type { Bar, RoundRecord } from './types';
 

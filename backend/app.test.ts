@@ -2,6 +2,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from './src/app.ts';
+import { randomRounds } from '../src/lib/__fixtures__/randomRounds';
+import * as reference from '../src/lib/__fixtures__/statsReference';
+import type { RoundRecord } from '../src/lib/types';
 import { MAX_ROUNDS_PER_USER } from './src/modules/stats/plugin.ts';
 
 describe('api without market data', () => {
@@ -208,6 +211,10 @@ describe('api without market data', () => {
       .map((r) => String(r.id));
     const relisted = await app.inject({ method: 'GET', url: '/api/stats/rounds', headers: { cookie } });
     expect((relisted.json().rounds as { id: string }[]).map((r) => r.id)).toEqual(expected);
+    const report = await app.inject({ method: 'GET', url: '/api/stats/report', headers: { cookie } });
+    expect(report.json()).toEqual(reference.computeStats(relisted.json().rounds as RoundRecord[]));
+    const recent = await app.inject({ method: 'GET', url: '/api/stats/recent', headers: { cookie } });
+    expect(recent.json().rounds).toEqual([...relisted.json().rounds].reverse());
   });
 
   it('keeps 409 for duplicates and 413 at the per-user cap', async () => {
@@ -279,6 +286,75 @@ describe('api without market data', () => {
     const me = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie } });
     expect(me.statusCode).toBe(401);
     expect(await realGet(sid)).toBeNull();
+  });
+
+  it('computes account reports and filters bounded recent history on the server', async () => {
+    const app = await makeApp();
+    for (const url of ['/api/stats/report', '/api/stats/recent']) {
+      expect((await app.inject({ method: 'GET', url })).statusCode).toBe(401);
+    }
+    const registered = await app.inject({
+      method: 'POST', url: '/api/auth/register',
+      payload: { username: 'statsuser', password: 'password1' },
+    });
+    const cookie = cookieFrom(registered);
+    const userId = registered.json().user.id as string;
+    const get = (url: string) => app.inject({ method: 'GET', url, headers: { cookie } });
+    expect((await get('/api/stats/report')).json()).toEqual(reference.computeStats([]));
+    expect((await get('/api/stats/recent')).json()).toEqual({ rounds: [] });
+
+    const rounds = randomRounds(42, 145).map((r, i) => ({
+      ...r, id: String(i).padStart(3, '0'), playedAt: Math.floor(i / 3),
+    }));
+    // Legacy records without a mode still belong to direction; import in reverse order.
+    delete rounds[0]!.mode;
+    const migrated = await app.inject({
+      method: 'POST', url: '/api/stats/migrate', headers: { cookie },
+      payload: { rounds: [...rounds].reverse() },
+    });
+    expect(migrated.json().count).toBe(rounds.length);
+    // Invalid JSON written out of band is ignored by both endpoints.
+    app.db.prepare('INSERT INTO user_rounds (user_id, id, played_at, payload) VALUES (?, ?, ?, ?)')
+      .run(userId, 'corrupt', 999, '{');
+    const report = await get('/api/stats/report');
+    expect(report.statusCode).toBe(200);
+    expect(report.json()).toEqual(reference.computeStats(rounds));
+    const recent = await get('/api/stats/recent');
+    expect(recent.statusCode).toBe(200);
+    expect(recent.json().rounds).toEqual([...rounds].reverse().slice(0, 100));
+
+    for (const query of ['symbol=ES', 'playTf=5m', 'mode=direction', 'symbol=NQ&playTf=1h&mode=bracket']) {
+      const params = new URLSearchParams(query);
+      const expected = [...rounds].reverse().filter((r) =>
+        (!params.has('symbol') || r.symbol === params.get('symbol')) &&
+        (!params.has('playTf') || r.playTf === params.get('playTf')) &&
+        (!params.has('mode') || (r.mode ?? 'direction') === params.get('mode')),
+      ).slice(0, 100);
+      const response = await get(`/api/stats/recent?${query}`);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().rounds).toEqual(expected);
+    }
+    for (const query of ['symbol=invalid', 'playTf=2m', 'mode=invalid']) {
+      expect((await get(`/api/stats/recent?${query}`)).statusCode).toBe(400);
+    }
+    expect((await get('/api/stats/report')).json()).toEqual(report.json());
+
+    const other = await app.inject({
+      method: 'POST', url: '/api/auth/register',
+      payload: { username: 'statsother', password: 'password1' },
+    });
+    for (const url of ['/api/stats/report', '/api/stats/recent']) {
+      const response = await app.inject({ method: 'GET', url, headers: { cookie: cookieFrom(other) } });
+      expect(response.json()).toEqual(url.endsWith('report') ? reference.computeStats([]) : { rounds: [] });
+    }
+    const added = { ...rounds[0]!, id: 'new-win', playedAt: 1000, skipped: false, correct: true };
+    expect((await app.inject({
+      method: 'POST', url: '/api/stats/rounds', headers: { cookie }, payload: added,
+    })).statusCode).toBe(200);
+    expect((await get('/api/stats/report')).json()).toEqual(reference.computeStats([...rounds, added]));
+    await app.inject({ method: 'DELETE', url: '/api/stats/rounds', headers: { cookie } });
+    expect((await get('/api/stats/report')).json()).toEqual(reference.computeStats([]));
+    expect((await get('/api/stats/recent')).json()).toEqual({ rounds: [] });
   });
 
   it('rejects short passwords and duplicate usernames', async () => {

@@ -1,90 +1,85 @@
-import { useMemo, useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import {
-  clearRounds,
-  hydrateRounds,
-  loadRounds,
-  roundsSyncAge,
-  roundsSynced,
-  subscribeRounds,
-  whenRoundsReady,
-} from '../lib/storage';
-import { computeStats, isSkipped, type SliceStat, type StatsReport } from '../lib/stats';
+import { clearRounds, subscribeRounds } from '../lib/storage';
+import { fetchRecentRounds, fetchStatsReport } from '../lib/api';
+import { isSkipped } from '../lib/stats';
+import type { SliceStat, StatsReport } from '../lib/statsTypes';
 import { TIMEFRAME_LABELS, type PlayMode, type RoundRecord, type SymbolId, type Timeframe } from '../lib/types';
 import { formatChicago } from '../lib/time';
 import { decimatedIndices } from '../lib/decimate';
 
-/** A cache synced this recently (e.g. by sign-in) is shown without refetching. */
-const FRESH_MS = 60_000;
-const RECENT_ROWS = 100;
-
-/** The cache array is replaced (never mutated) on change, so identity is a safe memo key. */
-let lastReport: { rounds: RoundRecord[]; report: StatsReport } | null = null;
-
-function statsOf(rounds: RoundRecord[]): StatsReport {
-  if (lastReport?.rounds !== rounds) lastReport = { rounds, report: computeStats(rounds) };
-  return lastReport.report;
-}
-
-function sameIds(a: RoundRecord[], b: RoundRecord[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i].id !== b[i].id) return false;
-  return true;
-}
-
 export function StatsPage() {
-  const [rounds, setRounds] = useState<RoundRecord[]>(() => loadRounds());
-  const [loading, setLoading] = useState(() => !roundsSynced());
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reportResult, setReportResult] = useState<{
+    revision: number; report: StatsReport | null; error: string | null;
+  } | null>(null);
+  const [clearError, setClearError] = useState<string | null>(null);
   const [filterSym, setFilterSym] = useState<SymbolId | 'all'>('all');
   const [filterTf, setFilterTf] = useState<Timeframe | 'all'>('all');
   const [filterMode, setFilterMode] = useState<PlayMode | 'all'>('all');
-  const report = useMemo(() => statsOf(rounds), [rounds]);
+  const [recentResult, setRecentResult] = useState<{
+    key: string; rounds: RoundRecord[]; error: string | null;
+  } | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const report = reportResult?.report ?? null;
+  const loading = reportResult?.revision !== revision;
+  const loadError = clearError ?? (loading ? null : reportResult?.error);
+  const recentKey = `${revision}:${filterSym}:${filterTf}:${filterMode}`;
+  const recentLoading = recentResult?.key !== recentKey;
+  const recentError = recentLoading ? null : recentResult?.error;
+  const filtered = recentLoading ? [] : recentResult?.rounds ?? [];
+
+  useEffect(() => subscribeRounds(() => setRevision((value) => value + 1)), []);
 
   useEffect(() => {
-    let cancelled = false;
-    const show = (next: RoundRecord[]) => {
-      if (cancelled) return;
-      // Payloads are immutable per id, so an identical id list means identical stats.
-      setRounds((prev) => (sameIds(prev, next) ? prev : next));
-      setLoadError(null);
-    };
-    const unsubscribe = subscribeRounds(() => show(loadRounds()));
-    (async () => {
-      try {
-        // Share a sign-in sync that is still in flight instead of fetching everything twice.
-        await whenRoundsReady();
-        if (roundsSyncAge() < FRESH_MS) show(loadRounds());
-        else show(await hydrateRounds());
-      } catch (e) {
-        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, []);
+    const controller = new AbortController();
+    fetchStatsReport(controller.signal)
+      .then((next) => {
+        if (!controller.signal.aborted) setReportResult({ revision, report: next, error: null });
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) setReportResult({
+          revision, report: null, error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    return () => controller.abort();
+  }, [revision]);
 
-  const filtered = useMemo(() => {
-    const out: RoundRecord[] = [];
-    for (let i = rounds.length - 1; i >= 0 && out.length < RECENT_ROWS; i--) {
-      const r = rounds[i];
-      if (filterSym !== 'all' && r.symbol !== filterSym) continue;
-      if (filterTf !== 'all' && r.playTf !== filterTf) continue;
-      if (filterMode !== 'all' && (r.mode ?? 'direction') !== filterMode) continue;
-      out.push(r);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchRecentRounds({
+      symbol: filterSym === 'all' ? undefined : filterSym,
+      playTf: filterTf === 'all' ? undefined : filterTf,
+      mode: filterMode === 'all' ? undefined : filterMode,
+    }, controller.signal)
+      .then((next) => {
+        if (!controller.signal.aborted) setRecentResult({ key: recentKey, rounds: next.rounds, error: null });
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) setRecentResult({
+          key: recentKey, rounds: [], error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    return () => controller.abort();
+  }, [filterSym, filterTf, filterMode, recentKey]);
+
+  async function handleClear() {
+    if (!confirm('确认清空全部对局记录？')) return;
+    setClearing(true);
+    try {
+      await clearRounds();
+    } catch (error) {
+      setClearError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setClearing(false);
     }
-    return out;
-  }, [rounds, filterSym, filterTf, filterMode]);
+  }
 
   if (loading) {
     return (
       <div className="page">
         <h1>统计分析</h1>
-        <div className="panel empty">正在加载对局记录…</div>
+        <div className="panel empty">正在加载统计分析…</div>
       </div>
     );
   }
@@ -94,11 +89,12 @@ export function StatsPage() {
       <div className="page">
         <h1>统计分析</h1>
         <div className="error-banner">{loadError}</div>
+        <button type="button" className="btn" onClick={() => { setClearError(null); setRevision((value) => value + 1); }}>重试</button>
       </div>
     );
   }
 
-  if (rounds.length === 0) {
+  if (!report || report.overall.total === 0) {
     return (
       <div className="page">
         <h1>统计分析</h1>
@@ -119,13 +115,10 @@ export function StatsPage() {
         <button
           type="button"
           className="btn btn-ghost btn-sm"
-          onClick={() => {
-            if (confirm('确认清空全部对局记录？')) {
-              void clearRounds().then(() => setRounds([]));
-            }
-          }}
+          disabled={clearing}
+          onClick={() => void handleClear()}
         >
-          清空记录
+          {clearing ? '正在清空…' : '清空记录'}
         </button>
       </div>
       <p className="lead">
@@ -222,6 +215,9 @@ export function StatsPage() {
             ))}
           </select>
         </div>
+        {recentError ? <div className="error-banner">{recentError}</div> : null}
+        {recentLoading ? <p className="muted">正在加载最近对局…</p> : null}
+        {!recentLoading && !recentError && filtered.length === 0 ? <p className="muted">没有符合筛选条件的对局。</p> : null}
         <div className="table-wrap">
           <table className="data">
             <thead>
